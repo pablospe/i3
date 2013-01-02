@@ -509,6 +509,7 @@ struct Con {
     xcb_pixmap_t pixmap;
     xcb_gcontext_t pm_gc;
     bool pixmap_recreated;
+    uint16_t frame_depth;
 
     /** Cache for the decoration rendering */
     struct deco_render_params *deco_render_params;
