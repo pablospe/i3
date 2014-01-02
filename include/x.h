@@ -8,8 +8,7 @@
  *      render.c). Basically a big state machine.
  *
  */
-#ifndef I3_X_H
-#define I3_X_H
+#pragma once
 
 /** Stores the X11 window ID of the currently focused window */
 extern xcb_window_t focused_id;
@@ -105,6 +104,12 @@ void x_raise_con(Con *con);
 void x_set_name(Con *con, const char *name);
 
 /**
+ * Set up the SHMLOG_PATH atom.
+ *
+ */
+void update_shmlog_atom(void);
+
+/**
  * Sets up i3 specific atoms (I3_SOCKET_PATH and I3_CONFIG_PATH)
  *
  */
@@ -124,5 +129,3 @@ void x_set_warp_to(Rect *rect);
  *
  */
 void x_mask_event_mask(uint32_t mask);
-
-#endif

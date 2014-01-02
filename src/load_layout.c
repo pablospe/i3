@@ -51,12 +51,12 @@ static int json_start_map(void *ctx) {
             if (last_key && strcasecmp(last_key, "floating_nodes") == 0) {
                 DLOG("New floating_node\n");
                 Con *ws = con_get_workspace(json_node);
-                json_node = con_new(NULL, NULL);
+                json_node = con_new_skeleton(NULL, NULL);
                 json_node->parent = ws;
                 DLOG("Parent is workspace = %p\n", ws);
             } else {
                 Con *parent = json_node;
-                json_node = con_new(NULL, NULL);
+                json_node = con_new_skeleton(NULL, NULL);
                 json_node->parent = parent;
             }
         }
@@ -67,8 +67,16 @@ static int json_start_map(void *ctx) {
 static int json_end_map(void *ctx) {
     LOG("end of map\n");
     if (!parsing_swallows && !parsing_rect && !parsing_window_rect && !parsing_geometry) {
+        /* Set a few default values to simplify manually crafted layout files. */
+        if (json_node->layout == L_DEFAULT) {
+            DLOG("Setting layout = L_SPLITH\n");
+            json_node->layout = L_SPLITH;
+        }
+
         LOG("attaching\n");
         con_attach(json_node, json_node->parent, true);
+        LOG("Creating window\n");
+        x_con_init(json_node, json_node->depth);
         json_node = json_node->parent;
     }
     if (parsing_rect)
@@ -143,12 +151,20 @@ static int json_string(void *ctx, const unsigned char *val, unsigned int len) {
 #endif
     LOG("string: %.*s for key %s\n", (int)len, val, last_key);
     if (parsing_swallows) {
-        /* TODO: the other swallowing keys */
+        char *sval;
+        sasprintf(&sval, "%.*s", len, val);
         if (strcasecmp(last_key, "class") == 0) {
-            current_swallow->class = scalloc((len+1) * sizeof(char));
-            memcpy(current_swallow->class, val, len);
+            current_swallow->class = regex_new(sval);
+        } else if (strcasecmp(last_key, "instance") == 0) {
+            current_swallow->instance = regex_new(sval);
+        } else if (strcasecmp(last_key, "window_role") == 0) {
+            current_swallow->window_role = regex_new(sval);
+        } else if (strcasecmp(last_key, "title") == 0) {
+            current_swallow->title = regex_new(sval);
+        } else {
+            ELOG("swallow key %s unknown\n", last_key);
         }
-        LOG("unhandled yet: swallow\n");
+        free(sval);
     } else {
         if (strcasecmp(last_key, "name") == 0) {
             json_node->name = scalloc((len+1) * sizeof(char));
@@ -186,6 +202,23 @@ static int json_string(void *ctx, const unsigned char *val, unsigned int len) {
             else if (strcasecmp(buf, "normal") == 0)
                 json_node->border_style = BS_NORMAL;
             else LOG("Unhandled \"border\": %s\n", buf);
+            free(buf);
+        } else if (strcasecmp(last_key, "type") == 0) {
+            char *buf = NULL;
+            sasprintf(&buf, "%.*s", (int)len, val);
+            if (strcasecmp(buf, "root") == 0)
+                json_node->type = CT_ROOT;
+            else if (strcasecmp(buf, "output") == 0)
+                json_node->type = CT_OUTPUT;
+            else if (strcasecmp(buf, "con") == 0)
+                json_node->type = CT_CON;
+            else if (strcasecmp(buf, "floating_con") == 0)
+                json_node->type = CT_FLOATING_CON;
+            else if (strcasecmp(buf, "workspace") == 0)
+                json_node->type = CT_WORKSPACE;
+            else if (strcasecmp(buf, "dockarea") == 0)
+                json_node->type = CT_DOCKAREA;
+            else LOG("Unhandled \"type\": %s\n", buf);
             free(buf);
         } else if (strcasecmp(last_key, "layout") == 0) {
             char *buf = NULL;
@@ -265,6 +298,7 @@ static int json_int(void *ctx, long long val) {
 static int json_int(void *ctx, long val) {
     LOG("int %ld for key %s\n", val, last_key);
 #endif
+    /* For backwards compatibility with i3 < 4.8 */
     if (strcasecmp(last_key, "type") == 0)
         json_node->type = val;
 
@@ -276,6 +310,9 @@ static int json_int(void *ctx, long val) {
 
     if (strcasecmp(last_key, "current_border_width") == 0)
         json_node->current_border_width = val;
+
+    if (strcasecmp(last_key, "depth") == 0)
+        json_node->depth = val;
 
     if (!parsing_swallows && strcasecmp(last_key, "id") == 0)
         json_node->old_id = val;
@@ -301,8 +338,8 @@ static int json_int(void *ctx, long val) {
             r->width = val;
         else if (strcasecmp(last_key, "height") == 0)
             r->height = val;
-        else printf("WARNING: unknown key %s in rect\n", last_key);
-        printf("rect now: (%d, %d, %d, %d)\n",
+        else ELOG("WARNING: unknown key %s in rect\n", last_key);
+        DLOG("rect now: (%d, %d, %d, %d)\n",
                 r->x, r->y, r->width, r->height);
     }
     if (parsing_swallows) {
@@ -382,6 +419,10 @@ void tree_append_json(const char *filename) {
     g = yajl_gen_alloc(NULL, NULL);
     hand = yajl_alloc(&callbacks, NULL, NULL, (void*)g);
 #endif
+    /* Allowing comments allows for more user-friendly layout files. */
+    yajl_config(hand, yajl_allow_comments, true);
+    /* Allow multiple values, i.e. multiple nodes to attach */
+    yajl_config(hand, yajl_allow_multiple_values, true);
     yajl_status stat;
     json_node = focused;
     to_focus = NULL;
@@ -392,8 +433,8 @@ void tree_append_json(const char *filename) {
     stat = yajl_parse(hand, (const unsigned char*)buf, n);
     if (stat != yajl_status_ok)
     {
-        unsigned char * str = yajl_get_error(hand, 1, (const unsigned char*)buf, n);
-        fprintf(stderr, "%s\n", (const char *) str);
+        unsigned char *str = yajl_get_error(hand, 1, (const unsigned char*)buf, n);
+        ELOG("JSON parsing error: %s\n", str);
         yajl_free_error(hand, str);
     }
 

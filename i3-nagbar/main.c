@@ -22,6 +22,7 @@
 #include <getopt.h>
 #include <limits.h>
 #include <fcntl.h>
+#include <paths.h>
 
 #include <xcb/xcb.h>
 #include <xcb/xcb_aux.h>
@@ -60,7 +61,7 @@ xcb_connection_t *conn;
 xcb_screen_t *root_screen;
 
 /*
- * Having verboselog() and errorlog() is necessary when using libi3.
+ * Having verboselog(), errorlog() and debuglog() is necessary when using libi3.
  *
  */
 void verboselog(char *fmt, ...) {
@@ -79,6 +80,9 @@ void errorlog(char *fmt, ...) {
     va_end(args);
 }
 
+void debuglog(char *fmt, ...) {
+}
+
 /*
  * Starts the given application by passing it through a shell. We use double fork
  * to avoid zombie processes. As the started application’s parent exits (immediately),
@@ -95,15 +99,8 @@ static void start_application(const char *command) {
         /* Child process */
         setsid();
         if (fork() == 0) {
-            /* Stores the path of the shell */
-            static const char *shell = NULL;
-
-            if (shell == NULL)
-                if ((shell = getenv("SHELL")) == NULL)
-                    shell = "/bin/sh";
-
             /* This is the child */
-            execl(shell, shell, "-c", command, (void*)NULL);
+            execl(_PATH_BSHELL, _PATH_BSHELL, "-c", command, (void*)NULL);
             /* not reached */
         }
         exit(0);
@@ -164,17 +161,22 @@ static void handle_button_release(xcb_connection_t *conn, xcb_button_release_eve
     /* Also closes fd */
     fclose(script);
 
+    char *link_path;
+    char *exe_path = get_exe_path(argv0);
+    sasprintf(&link_path, "%s.nagbar_cmd", script_path);
+    symlink(exe_path, link_path);
+
     char *terminal_cmd;
-    sasprintf(&terminal_cmd, "i3-sensible-terminal -e %s", argv0);
+    sasprintf(&terminal_cmd, "i3-sensible-terminal -e %s", link_path);
     printf("argv0 = %s\n", argv0);
     printf("terminal_cmd = %s\n", terminal_cmd);
 
-    setenv("_I3_NAGBAR_CMD", script_path, 1);
     start_application(terminal_cmd);
-    unsetenv("_I3_NAGBAR_CMD");
 
+    free(link_path);
     free(terminal_cmd);
     free(script_path);
+    free(exe_path);
 
     /* TODO: unset flag, re-render */
 }
@@ -195,8 +197,12 @@ static int handle_expose(xcb_connection_t *conn, xcb_expose_event_t *event) {
             4 + 4, 4 + 4, rect.width - 4 - 4);
 
     /* render close button */
+    const char *close_button_label = "X";
     int line_width = 4;
-    int w = 20;
+    /* set width to the width of the label */
+    int w = predict_text_width(i3string_from_utf8(close_button_label));
+    /* account for left/right padding, which seems to be set to 8px (total) below */
+    w += 8;
     int y = rect.width;
     uint32_t values[3];
     values[0] = color_button_background;
@@ -218,7 +224,8 @@ static int handle_expose(xcb_connection_t *conn, xcb_expose_event_t *event) {
 
     values[0] = 1;
     set_font_colors(pixmap_gc, color_text, color_button_background);
-    draw_text_ascii("X", pixmap, pixmap_gc, y - w - line_width + w / 2 - 4,
+    /* the x term here seems to set left/right padding */
+    draw_text_ascii(close_button_label, pixmap, pixmap_gc, y - w - line_width + w / 2 - 4,
             4 + 4 - 1, rect.width - y + w + line_width - w / 2 + 4);
     y -= w;
 
@@ -227,8 +234,10 @@ static int handle_expose(xcb_connection_t *conn, xcb_expose_event_t *event) {
     /* render custom buttons */
     line_width = 1;
     for (int c = 0; c < buttoncnt; c++) {
-        /* TODO: make w = text extents of the label */
-        w = 100;
+        /* set w to the width of the label */
+        w = predict_text_width(buttons[c].label);
+        /* account for left/right padding, which seems to be set to 12px (total) below */
+        w += 12;
         y -= 30;
         xcb_change_gc(conn, pixmap_gc, XCB_GC_FOREGROUND, (uint32_t[]){ color_button_background });
         close = (xcb_rectangle_t){ y - w - (2 * line_width), 2, w + (2 * line_width), rect.height - 6 };
@@ -249,6 +258,7 @@ static int handle_expose(xcb_connection_t *conn, xcb_expose_event_t *event) {
         values[0] = color_text;
         values[1] = color_button_background;
         set_font_colors(pixmap_gc, color_text, color_button_background);
+        /* the x term seems to set left/right padding */
         draw_text(buttons[c].label, pixmap, pixmap_gc,
                 y - w - line_width + 6, 4 + 3, rect.width - y + w + line_width - 6);
 
@@ -275,23 +285,35 @@ static int handle_expose(xcb_connection_t *conn, xcb_expose_event_t *event) {
 }
 
 int main(int argc, char *argv[]) {
-    /* The following lines are a horrible kludge. Because terminal emulators
-     * have different ways of interpreting the -e command line argument (some
-     * need -e "less /etc/fstab", others need -e less /etc/fstab), we need to
-     * write commands to a script and then just run that script. However, since
-     * on some machines, $XDG_RUNTIME_DIR and $TMPDIR are mounted with noexec,
-     * we cannot directly execute the script either.
+    /* The following lines are a terribly horrible kludge. Because terminal
+     * emulators have different ways of interpreting the -e command line
+     * argument (some need -e "less /etc/fstab", others need -e less
+     * /etc/fstab), we need to write commands to a script and then just run
+     * that script. However, since on some machines, $XDG_RUNTIME_DIR and
+     * $TMPDIR are mounted with noexec, we cannot directly execute the script
+     * either.
      *
-     * Therefore, we run i3-nagbar instead and pass the path to the script in
-     * the environment variable $_I3_NAGBAR_CMD. i3-nagbar then execs /bin/sh
-     * with that path in order to run that script.
+     * Initially, we tried to pass the command via the environment variable
+     * _I3_NAGBAR_CMD. But turns out that some terminal emulators such as
+     * xfce4-terminal run all windows from a single master process and only
+     * pass on the command (not the environment) to that master process.
+     *
+     * Therefore, we symlink i3-nagbar (which MUST reside on an executable
+     * filesystem) with a special name and run that symlink. When i3-nagbar
+     * recognizes it’s started as a binary ending in .nagbar_cmd, it strips off
+     * the .nagbar_cmd suffix and runs /bin/sh on argv[0]. That way, we can run
+     * a shell script on a noexec filesystem.
      *
      * From a security point of view, i3-nagbar is just an alias to /bin/sh in
      * certain circumstances. This should not open any new security issues, I
      * hope. */
     char *cmd = NULL;
-    if ((cmd = getenv("_I3_NAGBAR_CMD")) != NULL) {
-        unsetenv("_I3_NAGBAR_CMD");
+    const size_t argv0_len = strlen(argv[0]);
+    if (argv0_len > strlen(".nagbar_cmd") &&
+        strcmp(argv[0] + argv0_len - strlen(".nagbar_cmd"), ".nagbar_cmd") == 0) {
+        unlink(argv[0]);
+        cmd = strdup(argv[0]);
+        *(cmd + argv0_len - strlen(".nagbar_cmd")) = '\0';
         execl("/bin/sh", "/bin/sh", cmd, NULL);
         err(EXIT_FAILURE, "execv(/bin/sh, /bin/sh, %s)", cmd);
     }
@@ -307,7 +329,7 @@ int main(int argc, char *argv[]) {
         {"font", required_argument, 0, 'f'},
         {"button", required_argument, 0, 'b'},
         {"help", no_argument, 0, 'h'},
-        {"message", no_argument, 0, 'm'},
+        {"message", required_argument, 0, 'm'},
         {"type", required_argument, 0, 't'},
         {0, 0, 0, 0}
     };

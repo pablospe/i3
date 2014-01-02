@@ -19,6 +19,8 @@ state INITIAL:
   'exit' -> call cmd_exit()
   'restart' -> call cmd_restart()
   'reload' -> call cmd_reload()
+  'shmlog' -> SHMLOG
+  'debuglog' -> DEBUGLOG
   'border' -> BORDER
   'layout' -> LAYOUT
   'append_layout' -> APPEND_LAYOUT
@@ -30,11 +32,13 @@ state INITIAL:
   'split' -> SPLIT
   'floating' -> FLOATING
   'mark' -> MARK
+  'unmark' -> UNMARK
   'resize' -> RESIZE
   'rename' -> RENAME
   'nop' -> NOP
   'scratchpad' -> SCRATCHPAD
   'mode' -> MODE
+  'bar' -> BAR
 
 state CRITERIA:
   ctype = 'class' -> CRITERION
@@ -60,6 +64,17 @@ state EXEC:
       ->
   command = string
       -> call cmd_exec($nosn, $command)
+
+# shmlog <size>|toggle|on|off
+state SHMLOG:
+  # argument may be a number
+  argument = string
+    -> call cmd_shmlog($argument)
+
+# debuglog toggle|on|off
+state DEBUGLOG:
+  argument = 'toggle', 'on', 'off'
+    -> call cmd_debuglog($argument)
 
 # border normal|none|1pixel|toggle|1pixel
 state BORDER:
@@ -163,6 +178,13 @@ state MARK:
   mark = string
       -> call cmd_mark($mark)
 
+# unmark [mark]
+state UNMARK:
+  end
+      -> call cmd_unmark($mark)
+  mark = string
+      -> call cmd_unmark($mark)
+
 # resize
 state RESIZE:
   way = 'grow', 'shrink'
@@ -187,11 +209,11 @@ state RESIZE_TILING:
       -> call cmd_resize($way, $direction, $resize_px, "10")
 
 state RESIZE_TILING_OR:
-  'ppt'
-      ->
   resize_ppt = word
-      ->
-  end
+      -> RESIZE_TILING_FINAL
+
+state RESIZE_TILING_FINAL:
+  'ppt', end
       -> call cmd_resize($way, $direction, $resize_px, $resize_ppt)
 
 # rename workspace <name> to <name>
@@ -319,3 +341,24 @@ state NOP:
 state SCRATCHPAD:
   'show'
       -> call cmd_scratchpad_show()
+
+# bar (hidden_state hide|show|toggle)|(mode dock|hide|invisible|toggle) [<bar_id>]
+state BAR:
+  bar_type = 'hidden_state'
+      -> BAR_HIDDEN_STATE
+  bar_type = 'mode'
+      -> BAR_MODE
+
+state BAR_HIDDEN_STATE:
+  bar_value = 'hide', 'show', 'toggle'
+      -> BAR_W_ID
+
+state BAR_MODE:
+  bar_value = 'dock', 'hide', 'invisible', 'toggle'
+      -> BAR_W_ID
+
+state BAR_W_ID:
+  bar_id = word
+      ->
+  end
+      -> call cmd_bar($bar_type, $bar_value, $bar_id)

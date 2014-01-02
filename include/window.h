@@ -7,8 +7,7 @@
  * window.c: Updates window attributes (X11 hints/properties).
  *
  */
-#ifndef I3_WINDOW_H
-#define I3_WINDOW_H
+#pragma once
 
 /**
  * Updates the WM_CLASS (consisting of the class and instance) for the
@@ -61,13 +60,10 @@ void window_update_role(i3Window *win, xcb_get_property_reply_t *prop, bool befo
  * Updates the WM_HINTS (we only care about the input focus handling part).
  *
  */
-void window_update_hints(i3Window *win, xcb_get_property_reply_t *prop);
-
+void window_update_hints(i3Window *win, xcb_get_property_reply_t *prop, bool *urgency_hint);
 
 /**
  * Updates the _NET_WM_ICON
  *
  */
 void window_update_icon(i3Window *win, xcb_get_property_reply_t *prop);
-
-#endif

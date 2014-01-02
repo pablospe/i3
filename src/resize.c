@@ -51,10 +51,56 @@ DRAGGING_CB(resize_callback) {
     xcb_flush(conn);
 }
 
+bool resize_find_tiling_participants(Con **current, Con **other, direction_t direction) {
+    DLOG("Find two participants for resizing container=%p in direction=%i\n", other, direction);
+    Con *first = *current;
+    Con *second = NULL;
+    if (first == NULL) {
+        DLOG("Current container is NULL, aborting.\n");
+        return false;
+    }
+
+    /* Go up in the tree and search for a container to resize */
+    const orientation_t search_orientation = ((direction == D_LEFT || direction == D_RIGHT) ? HORIZ : VERT);
+    const bool dir_backwards = (direction == D_UP || direction == D_LEFT);
+    while (first->type != CT_WORKSPACE &&
+           first->type != CT_FLOATING_CON &&
+           second == NULL) {
+        /* get the appropriate first container with the matching
+         * orientation (skip stacked/tabbed cons) */
+        if ((con_orientation(first->parent) != search_orientation) ||
+            (first->parent->layout == L_STACKED) ||
+            (first->parent->layout == L_TABBED)) {
+            first = first->parent;
+            continue;
+        }
+
+        /* get the counterpart for this resizement */
+        if (dir_backwards) {
+            second = TAILQ_PREV(first, nodes_head, nodes);
+        } else {
+            second = TAILQ_NEXT(first, nodes);
+        }
+
+        if (second == NULL) {
+            DLOG("No second container in this direction found, trying to look further up in the tree...\n");
+            first = first->parent;
+        }
+    }
+
+    DLOG("Found participants: first=%p and second=%p.", first, second);
+    *current = first;
+    *other = second;
+    if (first == NULL || second == NULL) {
+        DLOG("Could not find two participants for this resize request.\n");
+        return false;
+    }
+
+    return true;
+}
+
 int resize_graphical_handler(Con *first, Con *second, orientation_t orientation, const xcb_button_press_event_t *event) {
     DLOG("resize handler\n");
-
-    uint32_t new_position;
 
     /* TODO: previously, we were getting a rect containing all screens. why? */
     Con *output = con_get_output(first);
@@ -74,19 +120,29 @@ int resize_graphical_handler(Con *first, Con *second, orientation_t orientation,
     xcb_window_t grabwin = create_window(conn, output->rect, XCB_COPY_FROM_PARENT, XCB_COPY_FROM_PARENT,
             XCB_WINDOW_CLASS_INPUT_ONLY, XCURSOR_CURSOR_POINTER, true, mask, values);
 
+    /* Keep track of the coordinate orthogonal to motion so we can determine
+     * the length of the resize afterward. */
+    uint32_t initial_position, new_position;
+
+    /* Configure the resizebar and snap the pointer. The resizebar runs along
+     * the rect of the second con and follows the motion of the pointer. */
     Rect helprect;
     if (orientation == HORIZ) {
-        helprect.x = event->root_x;
-        helprect.y = output->rect.y;
+        helprect.x = second->rect.x;
+        helprect.y = second->rect.y;
         helprect.width = 2;
-        helprect.height = output->rect.height;
-        new_position = event->root_x;
+        helprect.height = second->rect.height;
+        initial_position = second->rect.x;
+        xcb_warp_pointer(conn, XCB_NONE, event->root, 0, 0, 0, 0,
+                second->rect.x, event->root_y);
     } else {
-        helprect.x = output->rect.x;
-        helprect.y = event->root_y;
-        helprect.width = output->rect.width;
+        helprect.x = second->rect.x;
+        helprect.y = second->rect.y;
+        helprect.width = second->rect.width;
         helprect.height = 2;
-        new_position = event->root_y;
+        initial_position = second->rect.y;
+        xcb_warp_pointer(conn, XCB_NONE, event->root, 0, 0, 0, 0,
+                event->root_x, second->rect.y);
     }
 
     mask = XCB_CW_BACK_PIXEL;
@@ -104,18 +160,23 @@ int resize_graphical_handler(Con *first, Con *second, orientation_t orientation,
 
     xcb_flush(conn);
 
+    /* `new_position' will be updated by the `resize_callback'. */
+    new_position = initial_position;
+
     const struct callback_params params = { orientation, output, helpwin, &new_position };
 
-    drag_pointer(NULL, event, grabwin, BORDER_TOP, 0, resize_callback, &params);
+    /* `drag_pointer' blocks until the drag is completed. */
+    drag_result_t drag_result = drag_pointer(NULL, event, grabwin, BORDER_TOP, 0, resize_callback, &params);
 
     xcb_destroy_window(conn, helpwin);
     xcb_destroy_window(conn, grabwin);
     xcb_flush(conn);
 
-    int pixels;
-    if (orientation == HORIZ)
-        pixels = (new_position - event->root_x);
-    else pixels = (new_position - event->root_y);
+    /* User cancelled the drag so no action should be taken. */
+    if (drag_result == DRAG_REVERT)
+        return 0;
+
+    int pixels = (new_position - initial_position);
 
     DLOG("Done, pixels = %d\n", pixels);
 

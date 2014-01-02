@@ -153,7 +153,30 @@ void dump_node(yajl_gen gen, struct Con *con, bool inplace_restart) {
     y(integer, (long int)con);
 
     ystr("type");
-    y(integer, con->type);
+    switch (con->type) {
+        case CT_ROOT:
+            ystr("root");
+            break;
+        case CT_OUTPUT:
+            ystr("output");
+            break;
+        case CT_CON:
+            ystr("con");
+            break;
+        case CT_FLOATING_CON:
+            ystr("floating_con");
+            break;
+        case CT_WORKSPACE:
+            ystr("workspace");
+            break;
+        case CT_DOCKAREA:
+            ystr("dockarea");
+            break;
+        default:
+            DLOG("About to dump unknown container type=%d. This is a bug.\n", con->type);
+            assert(false);
+            break;
+    }
 
     /* provided for backwards compatibility only. */
     ystr("orientation");
@@ -283,6 +306,32 @@ void dump_node(yajl_gen gen, struct Con *con, bool inplace_restart) {
         y(integer, con->window->id);
     else y(null);
 
+    if (con->window && !inplace_restart) {
+        /* Window properties are useless to preserve when restarting because
+         * they will be queried again anyway. However, for i3-save-tree(1),
+         * they are very useful and save i3-save-tree dealing with X11. */
+        ystr("window_properties");
+        y(map_open);
+
+#define DUMP_PROPERTY(key, prop_name) do { \
+    if (con->window->prop_name != NULL) { \
+        ystr(key); \
+        ystr(con->window->prop_name); \
+    } \
+} while (0)
+
+        DUMP_PROPERTY("class", class_class);
+        DUMP_PROPERTY("instance", class_instance);
+        DUMP_PROPERTY("window_role", role);
+
+        if (con->window->name != NULL) {
+            ystr("title");
+            ystr(i3string_as_utf8(con->window->name));
+        }
+
+        y(map_close);
+    }
+
     ystr("nodes");
     y(array_open);
     Con *node;
@@ -353,6 +402,11 @@ void dump_node(yajl_gen gen, struct Con *con, bool inplace_restart) {
         }
     }
     y(array_close);
+
+    if (inplace_restart && con->window != NULL) {
+        ystr("depth");
+        y(integer, con->depth);
+    }
 
     y(map_close);
 }
@@ -616,9 +670,29 @@ IPC_HANDLER(get_bar_config) {
         YSTR_IF_SET(socket_path);
 
         ystr("mode");
-        if (config->mode == M_HIDE)
-            ystr("hide");
-        else ystr("dock");
+        switch (config->mode) {
+            case M_HIDE:
+                ystr("hide");
+                break;
+            case M_INVISIBLE:
+                ystr("invisible");
+                break;
+            case M_DOCK:
+            default:
+                ystr("dock");
+                break;
+        }
+
+        ystr("hidden_state");
+        switch (config->hidden_state) {
+            case S_SHOW:
+                ystr("show");
+                break;
+            case S_HIDE:
+            default:
+                ystr("hide");
+                break;
+        }
 
         ystr("modifier");
         switch (config->modifier) {
@@ -660,6 +734,9 @@ IPC_HANDLER(get_bar_config) {
 
         ystr("workspace_buttons");
         y(bool, !config->hide_workspace_buttons);
+
+        ystr("binding_mode_indicator");
+        y(bool, !config->hide_binding_mode_indicator);
 
         ystr("verbose");
         y(bool, config->verbose);

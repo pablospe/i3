@@ -155,6 +155,9 @@ __
     warnings->import;
 
     $x ||= i3test::X11->new;
+    # set the pointer to a predictable position in case a previous test has
+    # disturbed it
+    $x->root->warp_pointer(0, 0);
     $cv->recv if $i3_autostart;
 
     @_ = ($class);
@@ -315,6 +318,11 @@ Usually, though, calls are simpler:
 
   my $top_window = open_window;
 
+To identify the resulting window object in i3 commands, use the id property:
+
+  my $top_window = open_window;
+  cmd '[id="' . $top_window->id . '"] kill';
+
 =cut
 sub open_window {
     my %args = @_ == 1 ? %{$_[0]} : @_;
@@ -383,7 +391,7 @@ sub get_workspace_names {
     for my $output (@outputs) {
         next if $output->{name} eq '__i3';
         # get the first CT_CON of each output
-        my $content = first { $_->{type} == 2 } @{$output->{nodes}};
+        my $content = first { $_->{type} eq 'con' } @{$output->{nodes}};
         @cons = (@cons, @{$content->{nodes}});
     }
     [ map { $_->{name} } @cons ]
@@ -401,7 +409,7 @@ C<fresh_workspace> which directly switches to an unused workspace.
 sub get_unused_workspace {
     my @names = get_workspace_names();
     my $tmp;
-    do { $tmp = tmpnam() } while ($tmp ~~ @names);
+    do { $tmp = tmpnam() } while ((scalar grep { $_ eq $tmp } @names) > 0);
     $tmp
 }
 
@@ -426,7 +434,7 @@ sub fresh_workspace {
                         @{$tree->{nodes}};
         die "BUG: Could not find output $args{output}" unless defined($output);
         # Get the focused workspace on that output and switch to it.
-        my $content = first { $_->{type} == 2 } @{$output->{nodes}};
+        my $content = first { $_->{type} eq 'con' } @{$output->{nodes}};
         my $focused = $content->{focus}->[0];
         my $workspace = first { $_->{id} == $focused } @{$content->{nodes}};
         $workspace = $workspace->{name};
@@ -471,7 +479,7 @@ sub get_ws {
     my @workspaces;
     for my $output (@outputs) {
         # get the first CT_CON of each output
-        my $content = first { $_->{type} == 2 } @{$output->{nodes}};
+        my $content = first { $_->{type} eq 'con' } @{$output->{nodes}};
         @workspaces = (@workspaces, @{$content->{nodes}});
     }
 
@@ -581,13 +589,13 @@ sub get_dock_clients {
     for my $output (@outputs) {
         if (!defined($which)) {
             @docked = (@docked, map { @{$_->{nodes}} }
-                                grep { $_->{type} == 5 }
+                                grep { $_->{type} eq 'dockarea' }
                                 @{$output->{nodes}});
         } elsif ($which eq 'top') {
-            my $first = first { $_->{type} == 5 } @{$output->{nodes}};
+            my $first = first { $_->{type} eq 'dockarea' } @{$output->{nodes}};
             @docked = (@docked, @{$first->{nodes}}) if defined($first);
         } elsif ($which eq 'bottom') {
-            my @matching = grep { $_->{type} == 5 } @{$output->{nodes}};
+            my @matching = grep { $_->{type} eq 'dockarea' } @{$output->{nodes}};
             my $last = $matching[-1];
             @docked = (@docked, @{$last->{nodes}}) if defined($last);
         }
@@ -621,7 +629,7 @@ Returns true if C<$workspace> is the name of an existing workspace.
 =cut
 sub workspace_exists {
     my ($name) = @_;
-    ($name ~~ @{get_workspace_names()})
+    (scalar grep { $_ eq $name } @{get_workspace_names()}) > 0;
 }
 
 =head2 focused_ws
@@ -637,7 +645,7 @@ sub focused_ws {
     my $tree = $i3->get_tree->recv;
     my $focused = $tree->{focus}->[0];
     my $output = first { $_->{id} == $focused } @{$tree->{nodes}};
-    my $content = first { $_->{type} == 2 } @{$output->{nodes}};
+    my $content = first { $_->{type} eq 'con' } @{$output->{nodes}};
     my $first = first { $_->{fullscreen_mode} == 1 } @{$content->{nodes}};
     return $first->{name}
 }

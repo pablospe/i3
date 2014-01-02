@@ -7,8 +7,7 @@
  * child.c: Getting Input for the statusline
  *
  */
-#ifndef CHILD_H_
-#define CHILD_H_
+#pragma once
 
 #include <stdbool.h>
 
@@ -33,6 +32,12 @@ typedef struct {
      * The signal requested by the client to inform it of theun hidden state of i3bar
      */
     int cont_signal;
+
+    /**
+     * Enable click events
+     */
+    bool click_events;
+    bool click_events_init;
 } i3bar_child;
 
 /*
@@ -68,4 +73,8 @@ void stop_child(void);
  */
 void cont_child(void);
 
-#endif
+/*
+ * Generates a click event, if enabled.
+ *
+ */
+void send_block_clicked(int button, const char *name, const char *instance, int x, int y);

@@ -7,8 +7,7 @@
  * xcb.c: Communicating with X
  *
  */
-#ifndef XCB_H_
-#define XCB_H_
+#pragma once
 
 #include <stdint.h>
 //#include "outputs.h"
@@ -114,7 +113,7 @@ void realloc_sl_buffer(void);
  * Reconfigure all bars and create new for newly activated outputs
  *
  */
-void reconfig_windows(void);
+void reconfig_windows(bool redraw_bars);
 
 /*
  * Render the bars, with buttons and statusline
@@ -133,5 +132,3 @@ void redraw_bars(void);
  *
  */
 void set_current_mode(struct mode *mode);
-
-#endif

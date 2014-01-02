@@ -19,6 +19,7 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include "all.h"
+#include "shmlog.h"
 
 #include "sd-daemon.h"
 
@@ -29,6 +30,10 @@ struct rlimit original_rlimit_core;
 
 /** The number of file descriptors passed via socket activation. */
 int listen_fds;
+
+/* We keep the xcb_check watcher around to be able to enable and disable it
+ * temporarily for drag_pointer(). */
+static struct ev_check *xcb_check;
 
 static int xkb_event_base;
 
@@ -66,6 +71,9 @@ xcb_key_symbols_t *keysyms;
 
 /* Those are our connections to X11 for use with libXcursor and XKB */
 Display *xlibdpy, *xkbdpy;
+
+/* Default shmlog size if not set by user. */
+const int default_shmlog_size = 25 * 1024 * 1024;
 
 /* The list of key bindings */
 struct bindings_head *bindings;
@@ -139,6 +147,23 @@ static void xcb_check_cb(EV_P_ ev_check *w, int revents) {
     }
 }
 
+/*
+ * Enable or disable the main X11 event handling function.
+ * This is used by drag_pointer() which has its own, modal event handler, which
+ * takes precedence over the normal event handler.
+ *
+ */
+void main_set_x11_cb(bool enable) {
+    DLOG("Setting main X11 callback to enabled=%d\n", enable);
+    if (enable) {
+        ev_check_start(main_loop, xcb_check);
+        /* Trigger the watcher explicitly to handle all remaining X11 events.
+         * drag_pointer()’s event handler exits in the middle of the loop. */
+        ev_feed_event(main_loop, xcb_check, 0);
+    } else {
+        ev_check_stop(main_loop, xcb_check);
+    }
+}
 
 /*
  * When using xmodmap to change the keyboard mapping, this event
@@ -290,8 +315,8 @@ int main(int argc, char *argv[]) {
      * (file) logging. */
     init_logging();
 
-    /* On non-release builds, disable SHM logging by default. */
-    shmlog_size = (is_debug_build() ? 25 * 1024 * 1024 : 0);
+    /* On release builds, disable SHM logging by default. */
+    shmlog_size = (is_debug_build() ? default_shmlog_size : 0);
 
     start_argv = argv;
 
@@ -348,7 +373,7 @@ int main(int argc, char *argv[]) {
                     break;
                 } else if (strcmp(long_options[option_index].name, "get-socketpath") == 0 ||
                            strcmp(long_options[option_index].name, "get_socketpath") == 0) {
-                    char *socket_path = root_atom_contents("I3_SOCKET_PATH");
+                    char *socket_path = root_atom_contents("I3_SOCKET_PATH", NULL, 0);
                     if (socket_path) {
                         printf("%s\n", socket_path);
                         exit(EXIT_SUCCESS);
@@ -438,7 +463,7 @@ int main(int argc, char *argv[]) {
             optind++;
         }
         DLOG("Command is: %s (%zd bytes)\n", payload, strlen(payload));
-        char *socket_path = root_atom_contents("I3_SOCKET_PATH");
+        char *socket_path = root_atom_contents("I3_SOCKET_PATH", NULL, 0);
         if (!socket_path) {
             ELOG("Could not get i3 IPC socket path\n");
             return 1;
@@ -484,18 +509,25 @@ int main(int argc, char *argv[]) {
 
         /* The following code is helpful, but not required. We thus don’t pay
          * much attention to error handling, non-linux or other edge cases. */
-        char cwd[PATH_MAX];
         LOG("CORE DUMPS: You are running a development version of i3, so coredumps were automatically enabled (ulimit -c unlimited).\n");
-        if (getcwd(cwd, sizeof(cwd)) != NULL)
+        size_t cwd_size = 1024;
+        char *cwd = smalloc(cwd_size);
+        char *cwd_ret;
+        while ((cwd_ret = getcwd(cwd, cwd_size)) == NULL && errno == ERANGE) {
+            cwd_size = cwd_size * 2;
+            cwd = srealloc(cwd, cwd_size);
+        }
+        if (cwd_ret != NULL)
             LOG("CORE DUMPS: Your current working directory is \"%s\".\n", cwd);
         int patternfd;
         if ((patternfd = open("/proc/sys/kernel/core_pattern", O_RDONLY)) >= 0) {
-            memset(cwd, '\0', sizeof(cwd));
-            if (read(patternfd, cwd, sizeof(cwd)) > 0)
+            memset(cwd, '\0', cwd_size);
+            if (read(patternfd, cwd, cwd_size) > 0)
                 /* a trailing newline is included in cwd */
                 LOG("CORE DUMPS: Your core_pattern is: %s", cwd);
             close(patternfd);
         }
+        free(cwd);
     }
 
     LOG("i3 " I3_VERSION " starting\n");
@@ -606,6 +638,8 @@ int main(int argc, char *argv[]) {
             return 1;
         }
     }
+
+    restore_connect();
 
     /* Setup NetWM atoms */
     #define xmacro(name) \
@@ -725,10 +759,11 @@ int main(int argc, char *argv[]) {
 
     /* Set up i3 specific atoms like I3_SOCKET_PATH and I3_CONFIG_PATH */
     x_set_i3_atoms();
+    ewmh_update_workarea();
 
     struct ev_io *xcb_watcher = scalloc(sizeof(struct ev_io));
     struct ev_io *xkb = scalloc(sizeof(struct ev_io));
-    struct ev_check *xcb_check = scalloc(sizeof(struct ev_check));
+    xcb_check = scalloc(sizeof(struct ev_check));
     struct ev_prepare *xcb_prepare = scalloc(sizeof(struct ev_prepare));
 
     ev_io_init(xcb_watcher, xcb_got_event, xcb_get_file_descriptor(conn), EV_READ);
@@ -788,6 +823,27 @@ int main(int argc, char *argv[]) {
         manage_existing_windows(root);
     }
     xcb_ungrab_server(conn);
+
+    if (autostart) {
+        LOG("This is not an in-place restart, copying root window contents to a pixmap\n");
+        xcb_screen_t *root = xcb_aux_get_screen(conn, conn_screen);
+        uint16_t width = root->width_in_pixels;
+        uint16_t height = root->height_in_pixels;
+        xcb_pixmap_t pixmap = xcb_generate_id(conn);
+        xcb_gcontext_t gc = xcb_generate_id(conn);
+
+        xcb_create_pixmap(conn, root->root_depth, pixmap, root->root, width, height);
+
+        xcb_create_gc(conn, gc, root->root,
+            XCB_GC_FUNCTION | XCB_GC_PLANE_MASK | XCB_GC_FILL_STYLE | XCB_GC_SUBWINDOW_MODE,
+            (uint32_t[]){ XCB_GX_COPY, ~0, XCB_FILL_STYLE_SOLID, XCB_SUBWINDOW_MODE_INCLUDE_INFERIORS });
+
+        xcb_copy_area(conn, root->root, pixmap, gc, 0, 0, 0, 0, width, height);
+        xcb_change_window_attributes_checked(conn, root->root, XCB_CW_BACK_PIXMAP, (uint32_t[]){ pixmap });
+        xcb_flush(conn);
+        xcb_free_gc(conn, gc);
+        xcb_free_pixmap(conn, pixmap);
+    }
 
     struct sigaction action;
 

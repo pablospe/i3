@@ -9,13 +9,17 @@
  *        …).
  *
  */
-#ifndef I3_CON_H
-#define I3_CON_H
+#pragma once
 
 /**
  * Create a new container (and attach it to the given parent, if not NULL).
- * This function initializes the data structures and creates the appropriate
- * X11 IDs using x_con_init().
+ * This function only initializes the data structures.
+ *
+ */
+Con *con_new_skeleton(Con *parent, i3Window *window);
+
+
+/* A wrapper for con_new_skeleton, to retain the old con_new behaviour
  *
  */
 Con *con_new(Con *parent, i3Window *window);
@@ -270,7 +274,7 @@ void con_set_border_style(Con *con, int border_style, int border_width);
  * new split container before).
  *
  */
-void con_set_layout(Con *con, int layout);
+void con_set_layout(Con *con, layout_t layout);
 
 /**
  * This function toggles the layout of a given container. toggle_mode can be
@@ -335,5 +339,3 @@ void con_set_urgency(Con *con, bool urgent);
  *
  */
 char *con_get_tree_representation(Con *con);
-
-#endif

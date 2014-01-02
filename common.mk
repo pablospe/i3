@@ -3,8 +3,6 @@ DEBUG=1
 COVERAGE=0
 USE_ICONS=1
 INSTALL=install
-FLEX=flex
-BISON=bison
 ifndef PREFIX
   PREFIX=/usr
 endif
@@ -118,8 +116,8 @@ X11_CFLAGS := $(call cflags_for_lib, x11)
 X11_LIBS   := $(call ldflags_for_lib, x11,X11)
 
 # Xcursor
-XCURSOR_CFLAGS := $(call cflags_for_lib, xcursor)
-XCURSOR_LIBS   := $(call ldflags_for_lib, xcursor,Xcursor)
+XCURSOR_CFLAGS := $(call cflags_for_lib, xcb-cursor)
+XCURSOR_LIBS   := $(call ldflags_for_lib, xcb-cursor,xcb-cursor)
 
 # yajl
 YAJL_CFLAGS := $(call cflags_for_lib, yajl)
@@ -151,7 +149,7 @@ PANGO_LIBS   := $(call ldflags_for_lib, cairo)
 PANGO_LIBS   += $(call ldflags_for_lib, pangocairo)
 
 # libi3
-LIBS = -L$(TOPDIR) -li3
+LIBS = -L$(TOPDIR) -li3 -lm
 
 ## Platform-specific flags
 

@@ -13,6 +13,7 @@
 #include <sys/wait.h>
 #include <signal.h>
 #include <stdio.h>
+#include <stdarg.h>
 #include <fcntl.h>
 #include <string.h>
 #include <errno.h>
@@ -21,6 +22,8 @@
 #include <yajl/yajl_common.h>
 #include <yajl/yajl_parse.h>
 #include <yajl/yajl_version.h>
+#include <yajl/yajl_gen.h>
+#include <paths.h>
 
 #include "common.h"
 
@@ -34,6 +37,9 @@ ev_child *child_sig;
 /* JSON parser for stdin */
 yajl_callbacks callbacks;
 yajl_handle parser;
+
+/* JSON generator for stdout */
+yajl_gen gen;
 
 typedef struct parser_ctx {
     /* True if one of the parsed blocks was urgent */
@@ -52,6 +58,60 @@ parser_ctx parser_context;
 /* The buffer statusline points to */
 struct statusline_head statusline_head = TAILQ_HEAD_INITIALIZER(statusline_head);
 char *statusline_buffer = NULL;
+
+int child_stdin;
+
+/*
+ * Clears all blocks from the statusline structure in memory and frees their
+ * associated resources.
+ */
+static void clear_status_blocks() {
+    struct status_block *first;
+    while (!TAILQ_EMPTY(&statusline_head)) {
+        first = TAILQ_FIRST(&statusline_head);
+        I3STRING_FREE(first->full_text);
+        TAILQ_REMOVE(&statusline_head, first, blocks);
+        free(first);
+    }
+}
+
+/*
+ * Replaces the statusline in memory with an error message. Pass a format
+ * string and format parameters as you would in `printf'. The next time
+ * `draw_bars' is called, the error message text will be drawn on the bar in
+ * the space allocated for the statusline.
+ */
+
+/* forward function declaration is needed to add __attribute__ mechanism which
+ * helps the compiler understand we are defining a printf wrapper */
+static void set_statusline_error(const char *format, ...) __attribute__ ((format (printf, 1, 2)));
+
+static void set_statusline_error(const char *format, ...) {
+    clear_status_blocks();
+
+    char *message;
+    va_list args;
+    va_start(args, format);
+    vasprintf(&message, format, args);
+
+    struct status_block *err_block = scalloc(sizeof(struct status_block));
+    err_block->full_text = i3string_from_utf8("Error: ");
+    err_block->name = "error";
+    err_block->color = "red";
+    err_block->no_separator = true;
+
+    struct status_block *message_block = scalloc(sizeof(struct status_block));
+    message_block->full_text = i3string_from_utf8(message);
+    message_block->name = "error_message";
+    message_block->color = "red";
+    message_block->no_separator = true;
+
+    TAILQ_INSERT_HEAD(&statusline_head, err_block, blocks);
+    TAILQ_INSERT_TAIL(&statusline_head, message_block, blocks);
+
+    FREE(message);
+    va_end(args);
+}
 
 /*
  * Stop and free() the stdin- and sigchild-watchers
@@ -85,6 +145,8 @@ static int stdin_start_array(void *context) {
         first = TAILQ_FIRST(&statusline_head);
         I3STRING_FREE(first->full_text);
         FREE(first->color);
+        FREE(first->name);
+        FREE(first->instance);
         TAILQ_REMOVE(&statusline_head, first, blocks);
         free(first);
     }
@@ -151,6 +213,18 @@ static int stdin_string(void *context, const unsigned char *val, unsigned int le
         i3String *text = i3string_from_utf8_with_length((const char *)val, len);
         ctx->block.min_width = (uint32_t)predict_text_width(text);
         i3string_free(text);
+    }
+    if (strcasecmp(ctx->last_map_key, "name") == 0) {
+        char *copy = (char*)malloc(len+1);
+        strncpy(copy, (const char *)val, len);
+        copy[len] = 0;
+        ctx->block.name = copy;
+    }
+    if (strcasecmp(ctx->last_map_key, "instance") == 0) {
+        char *copy = (char*)malloc(len+1);
+        strncpy(copy, (const char *)val, len);
+        copy[len] = 0;
+        ctx->block.instance = copy;
     }
     return 1;
 }
@@ -220,6 +294,7 @@ static unsigned char *get_buffer(ev_io *watcher, int *ret_buffer_len) {
             /* end of file, kill the watcher */
             ELOG("stdin: received EOF\n");
             cleanup();
+            set_statusline_error("Received EOF from statusline process");
             draw_bars(false);
             *ret_buffer_len = -1;
             return NULL;
@@ -259,8 +334,18 @@ static bool read_json_input(unsigned char *input, int length) {
 #else
     if (status != yajl_status_ok && status != yajl_status_insufficient_data) {
 #endif
-        fprintf(stderr, "[i3bar] Could not parse JSON input (code %d): %.*s\n",
-                status, length, input);
+        char *message = (char *)yajl_get_error(parser, 0, input, length);
+
+        /* strip the newline yajl adds to the error message */
+        if (message[strlen(message) - 1] == '\n')
+            message[strlen(message) - 1] = '\0';
+
+        fprintf(stderr, "[i3bar] Could not parse JSON input (code = %d, message = %s): %.*s\n",
+                status, message, length, input);
+
+        set_statusline_error("Could not parse JSON (%s)", message);
+        yajl_free_error(parser, (unsigned char*)message);
+        draw_bars(false);
     } else if (parser_context.has_urgent) {
         has_urgent = true;
     }
@@ -330,19 +415,53 @@ void stdin_io_first_line_cb(struct ev_loop *loop, ev_io *watcher, int revents) {
  *
  */
 void child_sig_cb(struct ev_loop *loop, ev_child *watcher, int revents) {
+    int exit_status = WEXITSTATUS(watcher->rstatus);
+
     ELOG("Child (pid: %d) unexpectedly exited with status %d\n",
            child.pid,
-           watcher->rstatus);
+           exit_status);
+
+    /* this error is most likely caused by a user giving a nonexecutable or
+     * nonexistent file, so we will handle those cases separately. */
+    if (exit_status == 126)
+        set_statusline_error("status_command is not executable (exit %d)", exit_status);
+    else if (exit_status == 127)
+        set_statusline_error("status_command not found (exit %d)", exit_status);
+    else
+        set_statusline_error("status_command process exited unexpectedly (exit %d)", exit_status);
+
     cleanup();
+    draw_bars(false);
+}
+
+void child_write_output(void) {
+    if (child.click_events) {
+        const unsigned char *output;
+#if YAJL_MAJOR < 2
+        unsigned int size;
+#else
+        size_t size;
+#endif
+        yajl_gen_get_buf(gen, &output, &size);
+        write(child_stdin, output, size);
+        write(child_stdin, "\n", 1);
+        yajl_gen_clear(gen);
+    }
 }
 
 /*
  * Start a child-process with the specified command and reroute stdin.
  * We actually start a $SHELL to execute the command so we don't have to care
- * about arguments and such
+ * about arguments and such.
+ *
+ * If `command' is NULL, such as in the case when no `status_command' is given
+ * in the bar config, no child will be started.
  *
  */
 void start_child(char *command) {
+    if (command == NULL)
+        return;
+
     /* Allocate a yajl parser which will be used to parse stdin. */
     memset(&callbacks, '\0', sizeof(yajl_callbacks));
     callbacks.yajl_map_key = stdin_map_key;
@@ -357,41 +476,49 @@ void start_child(char *command) {
     yajl_parser_config parse_conf = { 0, 0 };
 
     parser = yajl_alloc(&callbacks, &parse_conf, NULL, (void*)&parser_context);
+
+    gen = yajl_gen_alloc(NULL, NULL);
 #else
     parser = yajl_alloc(&callbacks, NULL, &parser_context);
+
+    gen = yajl_gen_alloc(NULL);
 #endif
 
-    if (command != NULL) {
-        int fd[2];
-        if (pipe(fd) == -1)
-            err(EXIT_FAILURE, "pipe(fd)");
+    int pipe_in[2]; /* pipe we read from */
+    int pipe_out[2]; /* pipe we write to */
 
-        child.pid = fork();
-        switch (child.pid) {
-            case -1:
-                ELOG("Couldn't fork(): %s\n", strerror(errno));
-                exit(EXIT_FAILURE);
-            case 0:
-                /* Child-process. Reroute stdout and start shell */
-                close(fd[0]);
+    if (pipe(pipe_in) == -1)
+        err(EXIT_FAILURE, "pipe(pipe_in)");
+    if (pipe(pipe_out) == -1)
+        err(EXIT_FAILURE, "pipe(pipe_out)");
 
-                dup2(fd[1], STDOUT_FILENO);
+    child.pid = fork();
+    switch (child.pid) {
+        case -1:
+            ELOG("Couldn't fork(): %s\n", strerror(errno));
+            exit(EXIT_FAILURE);
+        case 0:
+            /* Child-process. Reroute streams and start shell */
 
-                static const char *shell = NULL;
+            close(pipe_in[0]);
+            close(pipe_out[1]);
 
-                if ((shell = getenv("SHELL")) == NULL)
-                    shell = "/bin/sh";
+            dup2(pipe_in[1], STDOUT_FILENO);
+            dup2(pipe_out[0], STDIN_FILENO);
 
-                execl(shell, shell, "-c", command, (char*) NULL);
-                return;
-            default:
-                /* Parent-process. Rerout stdin */
-                close(fd[1]);
+            setpgid(child.pid, 0);
+            execl(_PATH_BSHELL, _PATH_BSHELL, "-c", command, (char*) NULL);
+            return;
+        default:
+            /* Parent-process. Reroute streams */
 
-                dup2(fd[0], STDIN_FILENO);
+            close(pipe_in[1]);
+            close(pipe_out[0]);
 
-                break;
-        }
+            dup2(pipe_in[0], STDIN_FILENO);
+            child_stdin = pipe_out[1];
+
+            break;
     }
 
     /* We set O_NONBLOCK because blocking is evil in event-driven software */
@@ -409,6 +536,52 @@ void start_child(char *command) {
     atexit(kill_child_at_exit);
 }
 
+void child_click_events_initialize(void) {
+    if (!child.click_events_init) {
+        yajl_gen_array_open(gen);
+        child_write_output();
+        child.click_events_init = true;
+    }
+}
+
+void child_click_events_key(const char *key) {
+    yajl_gen_string(gen, (const unsigned char *)key, strlen(key));
+}
+
+/*
+ * Generates a click event, if enabled.
+ *
+ */
+void send_block_clicked(int button, const char *name, const char *instance, int x, int y) {
+    if (child.click_events) {
+        child_click_events_initialize();
+
+        yajl_gen_map_open(gen);
+
+        if (name) {
+            child_click_events_key("name");
+            yajl_gen_string(gen, (const unsigned char *)name, strlen(name));
+        }
+
+        if (instance) {
+            child_click_events_key("instance");
+            yajl_gen_string(gen, (const unsigned char *)instance, strlen(instance));
+        }
+
+        child_click_events_key("button");
+        yajl_gen_integer(gen, button);
+
+        child_click_events_key("x");
+        yajl_gen_integer(gen, x);
+
+        child_click_events_key("y");
+        yajl_gen_integer(gen, y);
+
+        yajl_gen_map_close(gen);
+        child_write_output();
+    }
+}
+
 /*
  * kill()s the child-process (if any). Called when exit()ing.
  *
@@ -416,8 +589,8 @@ void start_child(char *command) {
 void kill_child_at_exit(void) {
     if (child.pid > 0) {
         if (child.cont_signal > 0 && child.stopped)
-            kill(child.pid, child.cont_signal);
-        kill(child.pid, SIGTERM);
+            killpg(child.pid, child.cont_signal);
+        killpg(child.pid, SIGTERM);
     }
 }
 
@@ -429,8 +602,8 @@ void kill_child_at_exit(void) {
 void kill_child(void) {
     if (child.pid > 0) {
         if (child.cont_signal > 0 && child.stopped)
-            kill(child.pid, child.cont_signal);
-        kill(child.pid, SIGTERM);
+            killpg(child.pid, child.cont_signal);
+        killpg(child.pid, SIGTERM);
         int status;
         waitpid(child.pid, &status, 0);
         cleanup();
@@ -444,7 +617,7 @@ void kill_child(void) {
 void stop_child(void) {
     if (child.stop_signal > 0 && !child.stopped) {
         child.stopped = true;
-        kill(child.pid, child.stop_signal);
+        killpg(child.pid, child.stop_signal);
     }
 }
 
@@ -455,6 +628,6 @@ void stop_child(void) {
 void cont_child(void) {
     if (child.cont_signal > 0 && child.stopped) {
         child.stopped = false;
-        kill(child.pid, child.cont_signal);
+        killpg(child.pid, child.cont_signal);
     }
 }

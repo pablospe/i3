@@ -144,7 +144,7 @@ is(parser_calls("\nworkspace test"),
 ################################################################################
 
 is(parser_calls('unknown_literal'),
-   "ERROR: Expected one of these tokens: <end>, '[', 'move', 'exec', 'exit', 'restart', 'reload', 'border', 'layout', 'append_layout', 'workspace', 'focus', 'kill', 'open', 'fullscreen', 'split', 'floating', 'mark', 'resize', 'rename', 'nop', 'scratchpad', 'mode'\n" .
+   "ERROR: Expected one of these tokens: <end>, '[', 'move', 'exec', 'exit', 'restart', 'reload', 'shmlog', 'debuglog', 'border', 'layout', 'append_layout', 'workspace', 'focus', 'kill', 'open', 'fullscreen', 'split', 'floating', 'mark', 'unmark', 'resize', 'rename', 'nop', 'scratchpad', 'mode', 'bar'\n" .
    "ERROR: Your command: unknown_literal\n" .
    "ERROR:               ^^^^^^^^^^^^^^^",
    'error for unknown literal ok');
@@ -170,5 +170,20 @@ is(parser_calls('workspace "foo'),
 is(parser_calls('workspace "foo \"bar"'),
    'cmd_workspace_name(foo "bar)',
    'Command with escaped double quotes ok');
+
+################################################################################
+# 4: Verify that resize commands with a "px or ppt"-construction are parsed
+# correctly
+################################################################################
+
+is(parser_calls("resize shrink width 10 px or"),
+   "ERROR: Expected one of these tokens: <word>\n" .
+   "ERROR: Your command: resize shrink width 10 px or\n" .
+   "ERROR:                                           ",
+   "error for resize command with incomplete 'or'-construction ok");
+
+is(parser_calls("resize grow left 10 px or 20 ppt"),
+   "cmd_resize(grow, left, 10, 20)",
+   "resize command with 'or'-construction ok");
 
 done_testing;

@@ -7,8 +7,7 @@
  * log.c: Logging functions.
  *
  */
-#ifndef I3_LOG_H
-#define I3_LOG_H
+#pragma once
 
 #include <stdarg.h>
 #include <stdbool.h>
@@ -20,6 +19,9 @@
 #endif
 #if defined(ELOG)
 #undef ELOG
+#endif
+#if defined(DLOG)
+#undef DLOG
 #endif
 /** ##__VA_ARGS__ means: leave out __VA_ARGS__ completely if it is empty, that
    is, delete the preceding comma */
@@ -37,6 +39,24 @@ extern int shmlog_size;
  *
  */
 void init_logging(void);
+
+/**
+ * Opens the logbuffer.
+ *
+ */
+void open_logbuffer(void);
+
+/**
+ * Closes the logbuffer.
+ *
+ */
+void close_logbuffer(void);
+
+/**
+ * Checks if debug logging is active.
+ *
+ */
+bool get_debug_logging(void);
 
 /**
  * Set debug logging.
@@ -81,5 +101,3 @@ void verboselog(char *fmt, ...)
  * failures. This function is invoked automatically when exiting.
  */
 void purge_zerobyte_logfile(void);
-
-#endif

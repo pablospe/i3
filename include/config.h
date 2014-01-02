@@ -10,8 +10,7 @@
  * bindings mode).
  *
  */
-#ifndef I3_CONFIG_H
-#define I3_CONFIG_H
+#pragma once
 
 #include <stdbool.h>
 #include "queue.h"
@@ -95,7 +94,7 @@ struct Config {
     char *ipc_socket_path;
     const char *restart_state_path;
 
-    int default_layout;
+    layout_t default_layout;
     int container_stack_limit;
     int container_stack_limit_value;
     int default_border_width;
@@ -180,6 +179,7 @@ struct Config {
         struct Colortriple focused_inactive;
         struct Colortriple unfocused;
         struct Colortriple urgent;
+        struct Colortriple placeholder;
     } client;
     struct config_bar {
         struct Colortriple focused;
@@ -199,6 +199,9 @@ struct Config {
         /* just ignore the popup, that is, don’t map it */
         PDF_IGNORE = 2,
     } popup_during_fullscreen;
+
+    /* The number of currently parsed barconfigs */
+    int number_barconfigs;
 };
 
 /**
@@ -226,8 +229,11 @@ struct Barconfig {
      * root window! */
     char *socket_path;
 
-    /** Bar display mode (hide unless modifier is pressed or show in dock mode) */
-    enum { M_DOCK = 0, M_HIDE = 1 } mode;
+    /** Bar display mode (hide unless modifier is pressed or show in dock mode or always hide in invisible mode) */
+    enum { M_DOCK = 0, M_HIDE = 1, M_INVISIBLE = 2 } mode;
+
+    /* The current hidden_state of the bar, which indicates whether it is hidden or shown */
+    enum { S_HIDE = 0, S_SHOW = 1 } hidden_state;
 
     /** Bar modifier (to show bar when in hide mode). */
     enum {
@@ -260,6 +266,10 @@ struct Barconfig {
      * but we invert the bool to get the correct default when initializing with
      * zero. */
     bool hide_workspace_buttons;
+
+    /** Hide mode button? Configuration option is 'binding_mode_indicator no'
+     * but we invert the bool for the same reason as hide_workspace_buttons.*/
+    bool hide_binding_mode_indicator;
 
     /** Enable verbose mode? Useful for debugging purposes. */
     bool verbose;
@@ -324,6 +334,12 @@ void grab_all_keys(xcb_connection_t *conn, bool bind_mode_switch);
 void switch_mode(const char *new_mode);
 
 /**
+ * Sends the current bar configuration as an event to all barconfig_update listeners.
+ * This update mechnism currently only includes the hidden_state and the mode in the config.
+ *
+ */void update_barconfig();
+
+/**
  * Returns a pointer to the Binding with the specified modifiers and keycode
  * or NULL if no such binding exists.
  *
@@ -340,5 +356,3 @@ Binding *get_binding(uint16_t modifiers, bool key_release, xcb_keycode_t keycode
  *
  */
 void kill_configerror_nagbar(bool wait_for_it);
-
-#endif

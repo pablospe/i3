@@ -277,7 +277,12 @@ name (string)::
 	The internal name of this container. For all containers which are part
 	of the tree structure down to the workspace contents, this is set to a
 	nice human-readable name of the container.
+	For containers that have an X11 window, the content is the title
+	(_NET_WM_NAME property) of that window.
 	For all other containers, the content is not defined (yet).
+type (string)::
+	Type of this container. Can be one of "root", "output", "con",
+	"floating_con", "workspace" or "dockarea".
 border (string)::
 	Can be either "normal", "none" or "1pixel", dependending on the
 	container’s border style.
@@ -458,9 +463,8 @@ JSON dump:
 === MARKS reply
 
 The reply consists of a single array of strings for each container that has a
-mark. The order of that array is undefined. If more than one container has the
-same mark, it will be represented multiple times in the reply (the array
-contents are not unique).
+mark. A mark can only be set on one container, so the array is unique.
+The order of that array is undefined.
 
 If no window has a mark the response will be the empty array [].
 
@@ -495,6 +499,8 @@ font (string)::
 	The font to use for text on the bar.
 workspace_buttons (boolean)::
 	Display workspace buttons or not? Defaults to true.
+binding_mode_indicator (boolean)::
+	Display the mode indicator or not? Defaults to true.
 verbose (boolean)::
 	Should the bar enable verbose output for debugging? Defaults to false.
 colors (map)::
@@ -540,6 +546,7 @@ urgent_workspace_text/urgent_workspace_bar::
  "status_command": "i3status",
  "font": "-misc-fixed-medium-r-normal--13-120-75-75-C-70-iso10646-1",
  "workspace_buttons": true,
+ "binding_mode_indicator": true,
  "verbose": false,
  "colors": {
    "background": "#c0c0c0",
@@ -626,6 +633,9 @@ mode (2)::
 window (3)::
 	Sent when a client's window is successfully reparented (that is when i3
 	has finished fitting it into a container).
+barconfig_update (4)::
+    Sent when the hidden_state or mode field in the barconfig of any bar
+    instance was updated.
 
 *Example:*
 --------------------------------------------------------------------
@@ -665,12 +675,12 @@ but will still be present in the "old" property.
  "change": "focus",
  "current": {
   "id": 28489712,
-  "type":4,
+  "type": "workspace",
   ...
  }
  "old": {
   "id": 28489715,
-  "type": 4,
+  "type": "workspace",
   ...
  }
 }
@@ -717,9 +727,27 @@ window title as "urxvt").
  "change": "new",
  "container": {
   "id": 35569536,
-  "type": 2,
+  "type": "con",
   ...
  }
+}
+---------------------------
+
+=== barconfig_update event
+
+This event consists of a single serialized map reporting on options from the
+barconfig of the specified bar_id that were updated in i3. The map always
+consists of a property +id (string)+, which specifies to which bar instance the
+sent config update belongs, a property +hidden_state (string)+, which indicates
+the hidden_state of an i3bar instance, and a property +mode (string)+, which
+corresponds to the current mode.
+
+*Example:*
+---------------------------
+{
+    "id": "bar-0",
+    "hidden_state": "hide"
+    "mode": "hide"
 }
 ---------------------------
 

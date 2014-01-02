@@ -2,15 +2,14 @@
  * vim:ts=4:sw=4:expandtab
  *
  * i3 - an improved dynamic tiling window manager
- * © 2009-2011 Michael Stapelberg and contributors (see also: LICENSE)
+ * © 2009-2013 Michael Stapelberg and contributors (see also: LICENSE)
  *
  * xcursor.c: libXcursor support for themed cursors.
  *
  */
-#ifndef I3_XCURSOR_CURSOR_H
-#define I3_XCURSOR_CURSOR_H
+#pragma once
 
-#include <X11/Xlib.h>
+#include <xcb/xcb_cursor.h>
 
 enum xcursor_cursor_t {
     XCURSOR_CURSOR_POINTER = 0,
@@ -26,7 +25,7 @@ enum xcursor_cursor_t {
 };
 
 void xcursor_load_cursors(void);
-Cursor xcursor_get_cursor(enum xcursor_cursor_t c);
+xcb_cursor_t xcursor_get_cursor(enum xcursor_cursor_t c);
 int xcursor_get_xcb_cursor(enum xcursor_cursor_t c);
 
 /**
@@ -41,5 +40,3 @@ int xcursor_get_xcb_cursor(enum xcursor_cursor_t c);
  *
  */
 void xcursor_set_root_cursor(int cursor_id);
-
-#endif

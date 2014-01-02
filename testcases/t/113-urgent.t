@@ -24,8 +24,11 @@ my $_NET_WM_STATE_TOGGLE = 2;
 sub set_urgency {
     my ($win, $urgent_flag, $type) = @_;
     if ($type == 1) {
+        # Because X11::XCB does not keep track of clearing the urgency hint
+        # when receiving focus, we just delete it in all cases and then re-set
+        # it if appropriate.
+        $win->delete_hint('urgency');
         $win->add_hint('urgency') if ($urgent_flag);
-        $win->delete_hint('urgency') if (!$urgent_flag);
     } elsif ($type == 2) {
         my $msg = pack "CCSLLLLLL",
             X11::XCB::CLIENT_MESSAGE, # response_type
@@ -277,6 +280,32 @@ for ($type = 1; $type <= 2; $type++) {
     my $w = get_ws($ws1);
     is($w->{urgent}, 0, 'Urgent flag no longer set after killing the window ' .
        'from another workspace');
+
+##############################################################################
+# Check if urgent flag can be unset if we move the window out of the container
+##############################################################################
+    my $tmp = fresh_workspace;
+    cmd 'layout tabbed';
+    my $w1 = open_window;
+    my $w2 = open_window;
+    sync_with_i3;
+    cmd '[id="' . $w2->id . '"] focus';
+    sync_with_i3;
+    cmd 'split v';
+    cmd 'layout stacked';
+    my $w3 = open_window;
+    sync_with_i3;
+    cmd '[id="' . $w2->id . '"] focus';
+    sync_with_i3;
+    set_urgency($w3, 1, $type);
+    sync_with_i3;
+    cmd 'focus parent';
+    sync_with_i3;
+    cmd 'move right';
+    cmd '[id="' . $w3->id . '"] focus';
+    sync_with_i3;
+    my $ws = get_ws($tmp);
+    ok(!$ws->{urgent}, 'urgent flag not set on workspace');
 
     exit_gracefully($pid);
 }

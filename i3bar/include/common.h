@@ -5,8 +5,7 @@
  * © 2010-2011 Axel Wagner and contributors (see also: LICENSE)
  *
  */
-#ifndef COMMON_H_
-#define COMMON_H_
+#pragma once
 
 #include <stdbool.h>
 #include <xcb/xcb.h>
@@ -54,6 +53,10 @@ struct status_block {
     uint32_t x_offset;
     uint32_t x_append;
 
+    /* Optional */
+    char *name;
+    char *instance;
+
     TAILQ_ENTRY(status_block) blocks;
 };
 
@@ -70,5 +73,3 @@ TAILQ_HEAD(statusline_head, status_block) statusline_head;
 #include "config.h"
 #include "libi3.h"
 #include "parse_json_header.h"
-
-#endif

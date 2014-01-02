@@ -73,7 +73,15 @@ static int config_string_cb(void *params_, const unsigned char *val, unsigned in
 
     if (!strcmp(cur_key, "mode")) {
         DLOG("mode = %.*s, len = %d\n", len, val, len);
-        config.hide_on_modifier = (len == 4 && !strncmp((const char*)val, "hide", strlen("hide")));
+        config.hide_on_modifier = (len == 4 && !strncmp((const char*)val, "dock", strlen("dock")) ? M_DOCK
+            : (len == 4 && !strncmp((const char*)val, "hide", strlen("hide")) ? M_HIDE
+                : M_INVISIBLE));
+        return 1;
+    }
+
+    if (!strcmp(cur_key, "hidden_state")) {
+        DLOG("hidden_state = %.*s, len = %d\n", len, val, len);
+        config.hidden_state = (len == 4 && !strncmp((const char*)val, "hide", strlen("hide")) ? S_HIDE : S_SHOW);
         return 1;
     }
 
@@ -119,10 +127,6 @@ static int config_string_cb(void *params_, const unsigned char *val, unsigned in
     }
 
     if (!strcmp(cur_key, "status_command")) {
-        /* We cannot directly start the child here, because start_child() also
-         * needs to be run when no command was specified (to setup stdin).
-         * Therefore we save the command in 'config' and access it later in
-         * got_bar_config() */
         DLOG("command = %.*s\n", len, val);
         sasprintf(&config.command, "%.*s", len, val);
         return 1;
@@ -185,6 +189,12 @@ static int config_string_cb(void *params_, const unsigned char *val, unsigned in
  *
  */
 static int config_boolean_cb(void *params_, int val) {
+    if (!strcmp(cur_key, "binding_mode_indicator")) {
+        DLOG("binding_mode_indicator = %d\n", val);
+        config.disable_binding_mode_indicator = !val;
+        return 1;
+    }
+
     if (!strcmp(cur_key, "workspace_buttons")) {
         DLOG("workspace_buttons = %d\n", val);
         config.disable_ws = !val;

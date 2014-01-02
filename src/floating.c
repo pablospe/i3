@@ -315,6 +315,8 @@ void floating_disable(Con *con, bool automatic) {
         return;
     }
 
+    const bool set_focus = (con == focused);
+
     Con *ws = con_get_workspace(con);
 
     /* 1: detach from parent container */
@@ -344,8 +346,9 @@ void floating_disable(Con *con, bool automatic) {
     con_attach(con, con->parent, false);
 
     con_fix_percent(con->parent);
-    // TODO: don’t influence focus handling when Con was not focused before.
-    con_focus(con);
+
+    if (set_focus)
+        con_focus(con);
 }
 
 /*
@@ -438,8 +441,15 @@ void floating_drag_window(Con *con, const xcb_button_press_event_t *event) {
      * after the user releases the mouse button */
     tree_render();
 
+    /* Store the initial rect in case of user revert/cancel */
+    Rect initial_rect = con->rect;
+
     /* Drag the window */
-    drag_pointer(con, event, XCB_NONE, BORDER_TOP /* irrelevant */, XCURSOR_CURSOR_MOVE, drag_window_callback, event);
+    drag_result_t drag_result = drag_pointer(con, event, XCB_NONE, BORDER_TOP /* irrelevant */, XCURSOR_CURSOR_MOVE, drag_window_callback, event);
+
+    /* If the user cancelled, undo the changes. */
+    if (drag_result == DRAG_REVERT)
+        floating_reposition(con, initial_rect);
 
     /* If this is a scratchpad window, don't auto center it from now on. */
     if (con->scratchpad_state == SCRATCHPAD_FRESH)
@@ -543,30 +553,130 @@ void floating_resize_window(Con *con, const bool proportional,
 
     struct resize_window_callback_params params = { corner, proportional, event };
 
-    drag_pointer(con, event, XCB_NONE, BORDER_TOP /* irrelevant */, cursor, resize_window_callback, &params);
+    /* get the initial rect in case of revert/cancel */
+    Rect initial_rect = con->rect;
+
+    drag_result_t drag_result = drag_pointer(con, event, XCB_NONE, BORDER_TOP /* irrelevant */, cursor, resize_window_callback, &params);
+
+    /* If the user cancels, undo the resize */
+    if (drag_result == DRAG_REVERT)
+        floating_reposition(con, initial_rect);
 
     /* If this is a scratchpad window, don't auto center it from now on. */
     if (con->scratchpad_state == SCRATCHPAD_FRESH)
         con->scratchpad_state = SCRATCHPAD_CHANGED;
 }
 
+/* As endorsed by “ASSOCIATING CUSTOM DATA WITH A WATCHER” in ev(3) */
+struct drag_x11_cb {
+    ev_check check;
+
+    /* Whether this modal event loop should be exited and with which result. */
+    drag_result_t result;
+
+    /* The container that is being dragged or resized, or NULL if this is a
+     * drag of the resize handle. */
+    Con *con;
+
+    /* The dimensions of con when the loop was started. */
+    Rect old_rect;
+
+    /* The callback to invoke after every pointer movement. */
+    callback_t callback;
+
+    /* User data pointer for callback. */
+    const void *extra;
+};
+
+static void xcb_drag_check_cb(EV_P_ ev_check *w, int revents) {
+    struct drag_x11_cb *dragloop = (struct drag_x11_cb*)w;
+    xcb_motion_notify_event_t *last_motion_notify = NULL;
+    xcb_generic_event_t *event;
+
+    while ((event = xcb_poll_for_event(conn)) != NULL) {
+        if (event->response_type == 0) {
+            xcb_generic_error_t *error = (xcb_generic_error_t*)event;
+            DLOG("X11 Error received (probably harmless)! sequence 0x%x, error_code = %d\n",
+                 error->sequence, error->error_code);
+            free(event);
+            continue;
+        }
+
+        /* Strip off the highest bit (set if the event is generated) */
+        int type = (event->response_type & 0x7F);
+
+        switch (type) {
+            case XCB_BUTTON_RELEASE:
+                dragloop->result = DRAG_SUCCESS;
+                break;
+
+            case XCB_KEY_PRESS:
+                DLOG("A key was pressed during drag, reverting changes.");
+                dragloop->result = DRAG_REVERT;
+                handle_event(type, event);
+                break;
+
+            case XCB_UNMAP_NOTIFY: {
+                xcb_unmap_notify_event_t *unmap_event = (xcb_unmap_notify_event_t*)event;
+                Con *con = con_by_window_id(unmap_event->window);
+
+                if (con != NULL) {
+                    DLOG("UnmapNotify for window 0x%08x (container %p)\n", unmap_event->window, con);
+
+                    if (con_get_workspace(con) == con_get_workspace(focused)) {
+                        DLOG("UnmapNotify for a managed window on the current workspace, aborting\n");
+                        dragloop->result = DRAG_ABORT;
+                    }
+                }
+
+                handle_event(type, event);
+                break;
+            }
+
+            case XCB_MOTION_NOTIFY:
+                /* motion_notify events are saved for later */
+                FREE(last_motion_notify);
+                last_motion_notify = (xcb_motion_notify_event_t*)event;
+                break;
+
+            default:
+                DLOG("Passing to original handler\n");
+                handle_event(type, event);
+                break;
+        }
+
+        if (last_motion_notify != (xcb_motion_notify_event_t*)event)
+            free(event);
+
+        if (dragloop->result != DRAGGING)
+            return;
+    }
+
+    if (last_motion_notify == NULL)
+        return;
+
+    dragloop->callback(
+            dragloop->con,
+            &(dragloop->old_rect),
+            last_motion_notify->root_x,
+            last_motion_notify->root_y,
+            dragloop->extra);
+    free(last_motion_notify);
+}
+
+
 /*
- * This function grabs your pointer and lets you drag stuff around (borders).
- * Every time you move your mouse, an XCB_MOTION_NOTIFY event will be received
- * and the given callback will be called with the parameters specified (client,
- * border on which the click originally was), the original rect of the client,
- * the event and the new coordinates (x, y).
+ * This function grabs your pointer and keyboard and lets you drag stuff around
+ * (borders). Every time you move your mouse, an XCB_MOTION_NOTIFY event will
+ * be received and the given callback will be called with the parameters
+ * specified (client, border on which the click originally was), the original
+ * rect of the client, the event and the new coordinates (x, y).
  *
  */
-void drag_pointer(Con *con, const xcb_button_press_event_t *event, xcb_window_t
+drag_result_t drag_pointer(Con *con, const xcb_button_press_event_t *event, xcb_window_t
                 confine_to, border_t border, int cursor, callback_t callback, const void *extra)
 {
-    uint32_t new_x, new_y;
-    Rect old_rect = { 0, 0, 0, 0 };
-    if (con != NULL)
-        memcpy(&old_rect, &(con->rect), sizeof(Rect));
-
-    Cursor xcursor = (cursor && xcursor_supported) ?
+    xcb_cursor_t xcursor = (cursor && xcursor_supported) ?
         xcursor_get_cursor(cursor) : XCB_NONE;
 
     /* Grab the pointer */
@@ -584,76 +694,54 @@ void drag_pointer(Con *con, const xcb_button_press_event_t *event, xcb_window_t
 
     if ((reply = xcb_grab_pointer_reply(conn, cookie, NULL)) == NULL) {
         ELOG("Could not grab pointer\n");
-        return;
+        return DRAG_ABORT;
     }
 
     free(reply);
 
-    /* Go into our own event loop */
-    xcb_flush(conn);
+    /* Grab the keyboard */
+    xcb_grab_keyboard_cookie_t keyb_cookie;
+    xcb_grab_keyboard_reply_t *keyb_reply;
 
-    xcb_generic_event_t *inside_event, *last_motion_notify = NULL;
-    bool loop_done = false;
-    xcb_unmap_notify_event_t *unmap_event;
-    /* I’ve always wanted to have my own eventhandler… */
-    while (!loop_done && (inside_event = xcb_wait_for_event(conn))) {
-        /* We now handle all events we can get using xcb_poll_for_event */
-        do {
-            /* skip x11 errors */
-            if (inside_event->response_type == 0) {
-                free(inside_event);
-                continue;
-            }
-            /* Strip off the highest bit (set if the event is generated) */
-            int type = (inside_event->response_type & 0x7F);
+    keyb_cookie = xcb_grab_keyboard(conn,
+            false, /* get all keyboard events */
+            root, /* grab the root window */
+            XCB_CURRENT_TIME,
+            XCB_GRAB_MODE_ASYNC, /* continue processing pointer events as normal */
+            XCB_GRAB_MODE_ASYNC /* keyboard mode */
+            );
 
-            switch (type) {
-                case XCB_BUTTON_RELEASE:
-                    loop_done = true;
-                    break;
-
-                case XCB_MOTION_NOTIFY:
-                    /* motion_notify events are saved for later */
-                    FREE(last_motion_notify);
-                    last_motion_notify = inside_event;
-                    break;
-
-                case XCB_UNMAP_NOTIFY:
-                    handle_event(type, inside_event);
-                    unmap_event = (xcb_unmap_notify_event_t*) inside_event;
-                    if (unmap_event->window!=unmap_event->event) {
-                        DLOG("Unmap-notify, aborting\n");
-                        loop_done = true;
-                    }
-                    break;
-                case XCB_KEY_PRESS:
-                case XCB_KEY_RELEASE:
-                    handle_event(type, inside_event);
-                    loop_done = true;
-                    break;
-
-                default:
-                    DLOG("Passing to original handler\n");
-                    /* Use original handler */
-                    handle_event(type, inside_event);
-                    break;
-            }
-            if (last_motion_notify != inside_event)
-                free(inside_event);
-        } while ((inside_event = xcb_poll_for_event(conn)) != NULL);
-
-        if (last_motion_notify == NULL || loop_done)
-            continue;
-
-        new_x = ((xcb_motion_notify_event_t*)last_motion_notify)->root_x;
-        new_y = ((xcb_motion_notify_event_t*)last_motion_notify)->root_y;
-
-        callback(con, &old_rect, new_x, new_y, extra);
-        FREE(last_motion_notify);
+    if ((keyb_reply = xcb_grab_keyboard_reply(conn, keyb_cookie, NULL)) == NULL) {
+        ELOG("Could not grab keyboard\n");
+        return DRAG_ABORT;
     }
 
+    free(keyb_reply);
+
+    /* Go into our own event loop */
+    struct drag_x11_cb loop = {
+        .result = DRAGGING,
+        .con = con,
+        .callback = callback,
+        .extra = extra,
+    };
+    if (con)
+        loop.old_rect = con->rect;
+    ev_check_init(&loop.check, xcb_drag_check_cb);
+    main_set_x11_cb(false);
+    ev_check_start(main_loop, &loop.check);
+
+    while (loop.result == DRAGGING)
+        ev_run(main_loop, EVRUN_ONCE);
+
+    ev_check_stop(main_loop, &loop.check);
+    main_set_x11_cb(true);
+
+    xcb_ungrab_keyboard(conn, XCB_CURRENT_TIME);
     xcb_ungrab_pointer(conn, XCB_CURRENT_TIME);
     xcb_flush(conn);
+
+    return loop.result;
 }
 
 /*
@@ -666,11 +754,7 @@ void drag_pointer(Con *con, const xcb_button_press_event_t *event, xcb_window_t
 void floating_reposition(Con *con, Rect newrect) {
     /* Sanity check: Are the new coordinates on any output? If not, we
      * ignore that request. */
-    Output *output = get_output_containing(
-        newrect.x + (newrect.width / 2),
-        newrect.y + (newrect.height / 2));
-
-    if (!output) {
+    if (!contained_by_output(newrect)) {
         ELOG("No output found at destination coordinates. Not repositioning.\n");
         return;
     }

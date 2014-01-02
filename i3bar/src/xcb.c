@@ -59,6 +59,9 @@ xcb_connection_t *conn;
 /* The font we'll use */
 static i3Font font;
 
+/* Overall height of the bar (based on font size) */
+int bar_height;
+
 /* These are only relevant for XKB, which we only need for grabbing modifiers */
 Display          *xkb_dpy;
 int              xkb_event_base;
@@ -79,6 +82,9 @@ ev_io      *xkb_io;
 
 /* The name of current binding mode */
 static mode binding;
+
+/* Indicates whether a new binding mode was recently activated */
+bool activated_mode = false;
 
 /* The parsed colors */
 struct xcb_colors_t {
@@ -162,7 +168,7 @@ void refresh_statusline(void) {
         realloc_sl_buffer();
 
     /* Clear the statusline pixmap. */
-    xcb_rectangle_t rect = { 0, 0, root_screen->width_in_pixels, font.height };
+    xcb_rectangle_t rect = { 0, 0, root_screen->width_in_pixels, font.height + 2 };
     xcb_poly_fill_rectangle(xcb_connection, statusline_pm, statusline_clear, 1, &rect);
 
     /* Draw the text of each block. */
@@ -195,7 +201,7 @@ void refresh_statusline(void) {
  *
  */
 void hide_bars(void) {
-    if (!config.hide_on_modifier) {
+    if ((config.hide_on_modifier == M_DOCK) || (config.hidden_state == S_SHOW && config.hide_on_modifier == M_HIDE)) {
         return;
     }
 
@@ -214,7 +220,7 @@ void hide_bars(void) {
  *
  */
 void unhide_bars(void) {
-    if (!config.hide_on_modifier) {
+    if (config.hide_on_modifier != M_HIDE) {
         return;
     }
 
@@ -237,9 +243,9 @@ void unhide_bars(void) {
         values[0] = walk->rect.x;
         if (config.position == POS_TOP)
             values[1] = walk->rect.y;
-        else values[1] = walk->rect.y + walk->rect.h - font.height - 6;
+        else values[1] = walk->rect.y + walk->rect.h - bar_height;
         values[2] = walk->rect.w;
-        values[3] = font.height + 6;
+        values[3] = bar_height;
         values[4] = XCB_STACK_MODE_ABOVE;
         DLOG("Reconfiguring Window for output %s to %d,%d\n", walk->name, values[0], values[1]);
         cookie = xcb_configure_window_checked(xcb_connection,
@@ -320,24 +326,11 @@ void handle_button(xcb_button_press_event_t *event) {
     }
 
     int32_t x = event->event_x >= 0 ? event->event_x : 0;
+    int32_t original_x = x;
 
     DLOG("Got Button %d\n", event->detail);
 
     switch (event->detail) {
-        case 1:
-            /* Left Mousbutton. We determine, which button was clicked
-             * and set cur_ws accordingly */
-            TAILQ_FOREACH(cur_ws, walk->workspaces, tailq) {
-                DLOG("x = %d\n", x);
-                if (x >= 0 && x < cur_ws->name_width + 10) {
-                    break;
-                }
-                x -= cur_ws->name_width + 11;
-            }
-            if (cur_ws == NULL) {
-                return;
-            }
-            break;
         case 4:
             /* Mouse wheel up. We select the previous ws, if any.
              * If there is no more workspace, don’t even send the workspace
@@ -358,6 +351,52 @@ void handle_button(xcb_button_press_event_t *event) {
 
             cur_ws = TAILQ_NEXT(cur_ws, tailq);
             break;
+        default:
+            /* Check if this event regards a workspace button */
+            TAILQ_FOREACH(cur_ws, walk->workspaces, tailq) {
+                DLOG("x = %d\n", x);
+                if (x >= 0 && x < cur_ws->name_width + 10) {
+                    break;
+                }
+                x -= cur_ws->name_width + 11;
+            }
+            if (cur_ws == NULL) {
+                /* No workspace button was pressed.
+                 * Check if a status block has been clicked.
+                 * This of course only has an effect,
+                 * if the child reported bidirectional protocol usage. */
+
+                /* First calculate width of tray area */
+                trayclient *trayclient;
+                int tray_width = 0;
+                TAILQ_FOREACH_REVERSE(trayclient, walk->trayclients, tc_head, tailq) {
+                    if (!trayclient->mapped)
+                        continue;
+                    tray_width += (font.height + 2);
+                }
+
+                int block_x = 0, last_block_x;
+                int offset = (walk->rect.w - (statusline_width + tray_width)) - 10;
+
+                x = original_x - offset;
+                if (x < 0)
+                    return;
+
+                struct status_block *block;
+
+                TAILQ_FOREACH(block, &statusline_head, blocks) {
+                    last_block_x = block_x;
+                    block_x += block->width + block->x_offset + block->x_append;
+
+                    if (x <= block_x && x >= last_block_x) {
+                        send_block_clicked(event->detail, block->name, block->instance, event->root_x, event->root_y);
+                        return;
+                    }
+                }
+                return;
+            }
+            if (event->detail != 1)
+                return;
     }
 
     /* To properly handle workspace names with double quotes in them, we need
@@ -394,8 +433,9 @@ void handle_button(xcb_button_press_event_t *event) {
 }
 
 /*
- * Configures the x coordinate of all trayclients. To be called after adding a
- * new tray client or removing an old one.
+ * Adjusts the size of the tray window and alignment of the tray clients by
+ * configuring their respective x coordinates. To be called when mapping or
+ * unmapping a tray client window.
  *
  */
 static void configure_trayclients(void) {
@@ -505,7 +545,9 @@ static void handle_client_message(xcb_client_message_event_t* event) {
             }
             /* In case of tray_output == primary and there is no primary output
              * configured, we fall back to the first available output. */
-            if (output == NULL && strcasecmp("primary", config.tray_output) == 0) {
+            if (output == NULL &&
+                config.tray_output &&
+                strcasecmp("primary", config.tray_output) == 0) {
                 SLIST_FOREACH(walk, outputs, slist) {
                     if (!walk->active)
                         continue;
@@ -561,18 +603,18 @@ static void handle_client_message(xcb_client_message_event_t* event) {
              * exits/crashes. */
             xcb_change_save_set(xcb_connection, XCB_SET_MODE_INSERT, client);
 
+            trayclient *tc = smalloc(sizeof(trayclient));
+            tc->win = client;
+            tc->xe_version = xe_version;
+            tc->mapped = false;
+            TAILQ_INSERT_TAIL(output->trayclients, tc, tailq);
+
             if (map_it) {
                 DLOG("Mapping dock client\n");
                 xcb_map_window(xcb_connection, client);
             } else {
                 DLOG("Not mapping dock client yet\n");
             }
-            trayclient *tc = smalloc(sizeof(trayclient));
-            tc->win = client;
-            tc->mapped = map_it;
-            tc->xe_version = xe_version;
-            TAILQ_INSERT_TAIL(output->trayclients, tc, tailq);
-
             /* Trigger an update to copy the statusline text to the appropriate
              * position */
             configure_trayclients();
@@ -582,8 +624,69 @@ static void handle_client_message(xcb_client_message_event_t* event) {
 }
 
 /*
- * Handles UnmapNotify events. These events happen when a tray window unmaps
- * itself. We then update our data structure
+ * Handles DestroyNotify events by removing the tray client from the data
+ * structure. According to the XEmbed protocol, this is one way for a tray
+ * client to finish the protocol. After this event is received, there is no
+ * further interaction with the tray client.
+ *
+ * See: http://standards.freedesktop.org/xembed-spec/xembed-spec-latest.html
+ *
+ */
+static void handle_destroy_notify(xcb_destroy_notify_event_t* event) {
+    DLOG("DestroyNotify for window = %08x, event = %08x\n", event->window, event->event);
+
+    i3_output *walk;
+    SLIST_FOREACH(walk, outputs, slist) {
+        if (!walk->active)
+            continue;
+        DLOG("checking output %s\n", walk->name);
+        trayclient *trayclient;
+        TAILQ_FOREACH(trayclient, walk->trayclients, tailq) {
+            if (trayclient->win != event->window)
+                continue;
+
+            DLOG("Removing tray client with window ID %08x\n", event->window);
+            TAILQ_REMOVE(walk->trayclients, trayclient, tailq);
+
+            /* Trigger an update, we now have more space for the statusline */
+            configure_trayclients();
+            draw_bars(false);
+            return;
+        }
+    }
+}
+
+/*
+ * Handles MapNotify events. These events happen when a tray client shows its
+ * window. We respond by realigning the tray clients.
+ *
+ */
+static void handle_map_notify(xcb_map_notify_event_t* event) {
+    DLOG("MapNotify for window = %08x, event = %08x\n", event->window, event->event);
+
+    i3_output *walk;
+    SLIST_FOREACH(walk, outputs, slist) {
+        if (!walk->active)
+            continue;
+        DLOG("checking output %s\n", walk->name);
+        trayclient *trayclient;
+        TAILQ_FOREACH(trayclient, walk->trayclients, tailq) {
+            if (trayclient->win != event->window)
+                continue;
+
+            DLOG("Tray client mapped (window ID %08x). Adjusting tray.\n", event->window);
+            trayclient->mapped = true;
+
+            /* Trigger an update, we now have more space for the statusline */
+            configure_trayclients();
+            draw_bars(false);
+            return;
+        }
+    }
+}
+/*
+ * Handles UnmapNotify events. These events happen when a tray client hides its
+ * window. We respond by realigning the tray clients.
  *
  */
 static void handle_unmap_notify(xcb_unmap_notify_event_t* event) {
@@ -599,8 +702,8 @@ static void handle_unmap_notify(xcb_unmap_notify_event_t* event) {
             if (trayclient->win != event->window)
                 continue;
 
-            DLOG("Removing tray client with window ID %08x\n", event->window);
-            TAILQ_REMOVE(walk->trayclients, trayclient, tailq);
+            DLOG("Tray client unmapped (window ID %08x). Adjusting tray.\n", event->window);
+            trayclient->mapped = false;
 
             /* Trigger an update, we now have more space for the statusline */
             configure_trayclients();
@@ -667,15 +770,9 @@ static void handle_property_notify(xcb_property_notify_event_t *event) {
         if (trayclient->mapped && !map_it) {
             /* need to unmap the window */
             xcb_unmap_window(xcb_connection, trayclient->win);
-            trayclient->mapped = map_it;
-            configure_trayclients();
-            draw_bars(false);
         } else if (!trayclient->mapped && map_it) {
             /* need to map the window */
             xcb_map_window(xcb_connection, trayclient->win);
-            trayclient->mapped = map_it;
-            configure_trayclients();
-            draw_bars(false);
         }
         free(xembedr);
     }
@@ -757,10 +854,16 @@ void xcb_chk_cb(struct ev_loop *loop, ev_check *watcher, int revents) {
                  * example system tray widgets talk to us directly via client messages. */
                 handle_client_message((xcb_client_message_event_t*) event);
                 break;
-            case XCB_UNMAP_NOTIFY:
             case XCB_DESTROY_NOTIFY:
-                /* UnmapNotifies are received when a tray window unmaps itself */
+                /* DestroyNotify signifies the end of the XEmbed protocol */
+                handle_destroy_notify((xcb_destroy_notify_event_t*) event);
+                break;
+            case XCB_UNMAP_NOTIFY:
+                /* UnmapNotify is received when a tray client hides its window. */
                 handle_unmap_notify((xcb_unmap_notify_event_t*) event);
+                break;
+            case XCB_MAP_NOTIFY:
+                handle_map_notify((xcb_map_notify_event_t*) event);
                 break;
             case XCB_PROPERTY_NOTIFY:
                 /* PropertyNotify */
@@ -810,7 +913,7 @@ void xkb_io_cb(struct ev_loop *loop, ev_io *watcher, int revents) {
         modstate = mods & config.modifier;
     }
 
-#define DLOGMOD(modmask, status, barfunc) \
+#define DLOGMOD(modmask, status) \
     do { \
         switch (modmask) { \
             case ShiftMask: \
@@ -835,14 +938,17 @@ void xkb_io_cb(struct ev_loop *loop, ev_io *watcher, int revents) {
                 DLOG("Mod5Mask got " #status "!\n"); \
                 break; \
         } \
-        barfunc(); \
     } while (0)
 
     if (modstate != mod_pressed) {
         if (modstate == 0) {
-            DLOGMOD(config.modifier, released, hide_bars);
+            DLOGMOD(config.modifier, released);
+            if (!activated_mode)
+                hide_bars();
         } else {
-            DLOGMOD(config.modifier, pressed, unhide_bars);
+            DLOGMOD(config.modifier, pressed);
+            activated_mode = false;
+            unhide_bars();
         }
         mod_pressed = modstate;
     }
@@ -916,26 +1022,7 @@ char *init_xcb_early() {
     /* Now we get the atoms and save them in a nice data structure */
     get_atoms();
 
-    xcb_get_property_cookie_t path_cookie;
-    path_cookie = xcb_get_property_unchecked(xcb_connection,
-                                   0,
-                                   xcb_root,
-                                   atoms[I3_SOCKET_PATH],
-                                   XCB_GET_PROPERTY_TYPE_ANY,
-                                   0, PATH_MAX);
-
-    /* We check, if i3 set its socket-path */
-    xcb_get_property_reply_t *path_reply = xcb_get_property_reply(xcb_connection,
-                                                                  path_cookie,
-                                                                  NULL);
-    char *path = NULL;
-    if (path_reply) {
-        int len = xcb_get_property_value_length(path_reply);
-        if (len != 0) {
-            path = strndup(xcb_get_property_value(path_reply), len);
-        }
-    }
-
+    char *path = root_atom_contents("I3_SOCKET_PATH", xcb_connection, screen);
 
     if (xcb_request_failed(sl_pm_cookie, "Could not allocate statusline-buffer") ||
         xcb_request_failed(clear_ctx_cookie, "Could not allocate statusline-buffer-clearcontext") ||
@@ -947,25 +1034,13 @@ char *init_xcb_early() {
 }
 
 /*
- * Initialization which depends on 'config' being usable. Called after the
- * configuration has arrived.
+ * Register for xkb keyevents. To grab modifiers without blocking other applications from receiving key-events
+ * involving that modifier, we sadly have to use xkb which is not yet fully supported
+ * in xcb.
  *
  */
-void init_xcb_late(char *fontname) {
-    if (fontname == NULL)
-        fontname = "-misc-fixed-medium-r-normal--13-120-75-75-C-70-iso10646-1";
-
-    /* Load the font */
-    font = load_font(fontname, true);
-    set_font(&font);
-    DLOG("Calculated Font-height: %d\n", font.height);
-
-    xcb_flush(xcb_connection);
-
-    /* To grab modifiers without blocking other applications from receiving key-events
-     * involving that modifier, we sadly have to use xkb which is not yet fully supported
-     * in xcb */
-    if (config.hide_on_modifier) {
+void register_xkb_keyevents() {
+    if (xkb_dpy == NULL) {
         int xkb_major, xkb_minor, xkb_errbase, xkb_err;
         xkb_major = XkbMajorVersion;
         xkb_minor = XkbMinorVersion;
@@ -1003,6 +1078,41 @@ void init_xcb_late(char *fontname) {
         ev_io_start(main_loop, xkb_io);
         XFlush(xkb_dpy);
     }
+}
+
+/*
+ * Deregister from xkb keyevents.
+ *
+ */
+void deregister_xkb_keyevents() {
+    if (xkb_dpy != NULL) {
+        ev_io_stop (main_loop, xkb_io);
+        XCloseDisplay(xkb_dpy);
+        close(xkb_io->fd);
+        FREE(xkb_io);
+        xkb_dpy = NULL;
+    }
+}
+
+/*
+ * Initialization which depends on 'config' being usable. Called after the
+ * configuration has arrived.
+ *
+ */
+void init_xcb_late(char *fontname) {
+    if (fontname == NULL)
+        fontname = "-misc-fixed-medium-r-normal--13-120-75-75-C-70-iso10646-1";
+
+    /* Load the font */
+    font = load_font(fontname, true);
+    set_font(&font);
+    DLOG("Calculated Font-height: %d\n", font.height);
+    bar_height = font.height + 6;
+
+    xcb_flush(xcb_connection);
+
+    if (config.hide_on_modifier == M_HIDE)
+        register_xkb_keyevents();
 }
 
 /*
@@ -1271,7 +1381,7 @@ void realloc_sl_buffer(void) {
                                                                statusline_pm,
                                                                xcb_root,
                                                                MAX(root_screen->width_in_pixels, statusline_width),
-                                                               root_screen->height_in_pixels);
+                                                               bar_height);
 
     uint32_t mask = XCB_GC_FOREGROUND;
     uint32_t vals[2] = { colors.bar_bg, colors.bar_bg };
@@ -1305,7 +1415,7 @@ void realloc_sl_buffer(void) {
  * Reconfigure all bars and create new bars for recently activated outputs
  *
  */
-void reconfig_windows(void) {
+void reconfig_windows(bool redraw_bars) {
     uint32_t mask;
     uint32_t values[5];
     static bool tray_configured = false;
@@ -1327,8 +1437,8 @@ void reconfig_windows(void) {
             mask = XCB_CW_BACK_PIXEL | XCB_CW_OVERRIDE_REDIRECT | XCB_CW_EVENT_MASK;
             /* Black background */
             values[0] = colors.bar_bg;
-            /* If hide_on_modifier is set, i3 is not supposed to manage our bar-windows */
-            values[1] = config.hide_on_modifier;
+            /* If hide_on_modifier is set to hide or invisible mode, i3 is not supposed to manage our bar-windows */
+            values[1] = (config.hide_on_modifier == M_DOCK ? 0 : 1);
             /* We enable the following EventMask fields:
              * EXPOSURE, to get expose events (we have to re-draw then)
              * SUBSTRUCTURE_REDIRECT, to get ConfigureRequests when the tray
@@ -1344,8 +1454,8 @@ void reconfig_windows(void) {
                                                                      root_screen->root_depth,
                                                                      walk->bar,
                                                                      xcb_root,
-                                                                     walk->rect.x, walk->rect.y + walk->rect.h - font.height - 6,
-                                                                     walk->rect.w, font.height + 6,
+                                                                     walk->rect.x, walk->rect.y + walk->rect.h - bar_height,
+                                                                     walk->rect.w, bar_height,
                                                                      0,
                                                                      XCB_WINDOW_CLASS_INPUT_OUTPUT,
                                                                      root_screen->root_visual,
@@ -1358,7 +1468,7 @@ void reconfig_windows(void) {
                                                                     walk->buffer,
                                                                     walk->bar,
                                                                     walk->rect.w,
-                                                                    walk->rect.h);
+                                                                    bar_height);
 
             /* Set the WM_CLASS and WM_NAME (we don't need UTF-8) atoms */
             xcb_void_cookie_t class_cookie;
@@ -1419,12 +1529,12 @@ void reconfig_windows(void) {
                 case POS_NONE:
                     break;
                 case POS_TOP:
-                    strut_partial.top = font.height + 6;
+                    strut_partial.top = bar_height;
                     strut_partial.top_start_x = walk->rect.x;
                     strut_partial.top_end_x = walk->rect.x + walk->rect.w;
                     break;
                 case POS_BOT:
-                    strut_partial.bottom = font.height + 6;
+                    strut_partial.bottom = bar_height;
                     strut_partial.bottom_start_x = walk->rect.x;
                     strut_partial.bottom_end_x = walk->rect.x + walk->rect.w;
                     break;
@@ -1449,7 +1559,7 @@ void reconfig_windows(void) {
 
             /* We finally map the bar (display it on screen), unless the modifier-switch is on */
             xcb_void_cookie_t map_cookie;
-            if (!config.hide_on_modifier) {
+            if (config.hide_on_modifier == M_DOCK) {
                 map_cookie = xcb_map_window_checked(xcb_connection, walk->bar);
             }
 
@@ -1460,14 +1570,24 @@ void reconfig_windows(void) {
                 xcb_request_failed(name_cookie,  "Could not set WM_NAME")   ||
                 xcb_request_failed(strut_cookie, "Could not set strut")     ||
                 xcb_request_failed(gc_cookie,    "Could not create graphical context") ||
-                (!config.hide_on_modifier && xcb_request_failed(map_cookie, "Could not map window"))) {
+                ((config.hide_on_modifier == M_DOCK) && xcb_request_failed(map_cookie, "Could not map window"))) {
                 exit(EXIT_FAILURE);
             }
 
-            if (!tray_configured &&
-                (!config.tray_output ||
-                 strcasecmp("none", config.tray_output) != 0)) {
-                init_tray();
+            const char *tray_output = (config.tray_output ? config.tray_output : SLIST_FIRST(outputs)->name);
+            if (!tray_configured && strcasecmp(tray_output, "none") != 0) {
+                /* Configuration sanity check: ensure this i3bar instance handles the output on
+                 * which the tray should appear (e.g. don’t initialize a tray if tray_output ==
+                 * VGA-1 but output == [HDMI-1]).
+                 */
+                i3_output *output;
+                SLIST_FOREACH(output, outputs, slist) {
+                    if (strcasecmp(output->name, tray_output) == 0 ||
+                            (strcasecmp(tray_output, "primary") == 0 && output->primary)) {
+                        init_tray();
+                        break;
+                    }
+                }
                 tray_configured = true;
             }
         } else {
@@ -1478,9 +1598,9 @@ void reconfig_windows(void) {
                    XCB_CONFIG_WINDOW_HEIGHT |
                    XCB_CONFIG_WINDOW_STACK_MODE;
             values[0] = walk->rect.x;
-            values[1] = walk->rect.y + walk->rect.h - font.height - 6;
+            values[1] = walk->rect.y + walk->rect.h - bar_height;
             values[2] = walk->rect.w;
-            values[3] = font.height + 6;
+            values[3] = bar_height;
             values[4] = XCB_STACK_MODE_ABOVE;
 
             DLOG("Destroying buffer for output %s\n", walk->name);
@@ -1492,18 +1612,47 @@ void reconfig_windows(void) {
                                                                         mask,
                                                                         values);
 
+            mask = XCB_CW_OVERRIDE_REDIRECT;
+            values[0] = (config.hide_on_modifier == M_DOCK ? 0 : 1);
+            DLOG("Changing Window attribute override_redirect for output %s to %d\n", walk->name, values[0]);
+            xcb_void_cookie_t chg_cookie = xcb_change_window_attributes(xcb_connection,
+                                                                        walk->bar,
+                                                                        mask,
+                                                                        values);
+
             DLOG("Recreating buffer for output %s\n", walk->name);
             xcb_void_cookie_t pm_cookie = xcb_create_pixmap_checked(xcb_connection,
                                                                     root_screen->root_depth,
                                                                     walk->buffer,
                                                                     walk->bar,
                                                                     walk->rect.w,
-                                                                    walk->rect.h);
+                                                                    bar_height);
 
-            if (xcb_request_failed(cfg_cookie, "Could not reconfigure window")) {
-                exit(EXIT_FAILURE);
+            xcb_void_cookie_t map_cookie, umap_cookie;
+            if (redraw_bars) {
+                /* Unmap the window, and draw it again when in dock mode */
+                umap_cookie = xcb_unmap_window_checked(xcb_connection, walk->bar);
+                if (config.hide_on_modifier == M_DOCK) {
+                    cont_child();
+                    map_cookie = xcb_map_window_checked(xcb_connection, walk->bar);
+                } else {
+                    stop_child();
+                }
+
+                if (config.hide_on_modifier == M_HIDE) {
+                    /* Switching to hide mode, register for keyevents */
+                    register_xkb_keyevents();
+                } else {
+                    /* Switching to dock/invisible mode, deregister from keyevents */
+                    deregister_xkb_keyevents();
+                }
             }
-            if (xcb_request_failed(pm_cookie,  "Could not create pixmap")) {
+
+            if (xcb_request_failed(cfg_cookie, "Could not reconfigure window") ||
+                xcb_request_failed(chg_cookie, "Could not change window") ||
+                xcb_request_failed(pm_cookie,  "Could not create pixmap") ||
+                (redraw_bars && (xcb_request_failed(umap_cookie,  "Could not unmap window") ||
+                (config.hide_on_modifier == M_DOCK && xcb_request_failed(map_cookie, "Could not map window"))))) {
                 exit(EXIT_FAILURE);
             }
         }
@@ -1516,12 +1665,9 @@ void reconfig_windows(void) {
  */
 void draw_bars(bool unhide) {
     DLOG("Drawing Bars...\n");
-    int i = 1;
+    int i = 0;
 
     refresh_statusline();
-
-    static char *last_urgent_ws = NULL;
-    bool walks_away = true;
 
     i3_output *outputs_walk;
     SLIST_FOREACH(outputs_walk, outputs, slist) {
@@ -1531,7 +1677,7 @@ void draw_bars(bool unhide) {
         }
         if (outputs_walk->bar == XCB_NONE) {
             /* Oh shit, an active output without an own bar. Create it now! */
-            reconfig_windows();
+            reconfig_windows(false);
         }
         /* First things first: clear the backbuffer */
         uint32_t color = colors.bar_bg;
@@ -1539,7 +1685,7 @@ void draw_bars(bool unhide) {
                       outputs_walk->bargc,
                       XCB_GC_FOREGROUND,
                       &color);
-        xcb_rectangle_t rect = { 0, 0, outputs_walk->rect.w, font.height + 6 };
+        xcb_rectangle_t rect = { 0, 0, outputs_walk->rect.w, bar_height };
         xcb_poly_fill_rectangle(xcb_connection,
                                 outputs_walk->buffer,
                                 outputs_walk->bargc,
@@ -1571,75 +1717,67 @@ void draw_bars(bool unhide) {
                           outputs_walk->bargc,
                           MAX(0, (int16_t)(statusline_width - outputs_walk->rect.w + 4)), 0,
                           MAX(0, (int16_t)(outputs_walk->rect.w - statusline_width - traypx - 4)), 3,
-                          MIN(outputs_walk->rect.w - traypx - 4, statusline_width), font.height);
+                          MIN(outputs_walk->rect.w - traypx - 4, statusline_width), font.height + 2);
         }
 
-        if (config.disable_ws) {
-            continue;
-        }
-
-        i3_ws *ws_walk;
-
-        TAILQ_FOREACH(ws_walk, outputs_walk->workspaces, tailq) {
-            DLOG("Drawing Button for WS %s at x = %d, len = %d\n", i3string_as_utf8(ws_walk->name), i, ws_walk->name_width);
-            uint32_t fg_color = colors.inactive_ws_fg;
-            uint32_t bg_color = colors.inactive_ws_bg;
-            uint32_t border_color = colors.inactive_ws_border;
-            if (ws_walk->visible) {
-                if (!ws_walk->focused) {
-                    fg_color = colors.active_ws_fg;
-                    bg_color = colors.active_ws_bg;
-                    border_color = colors.active_ws_border;
-                } else {
-                    fg_color = colors.focus_ws_fg;
-                    bg_color = colors.focus_ws_bg;
-                    border_color = colors.focus_ws_border;
-                    if (last_urgent_ws && strcmp(i3string_as_utf8(ws_walk->name), last_urgent_ws) == 0)
-                        walks_away = false;
+        if (!config.disable_ws) {
+            i3_ws *ws_walk;
+            TAILQ_FOREACH(ws_walk, outputs_walk->workspaces, tailq) {
+                DLOG("Drawing Button for WS %s at x = %d, len = %d\n",
+                     i3string_as_utf8(ws_walk->name), i, ws_walk->name_width);
+                uint32_t fg_color = colors.inactive_ws_fg;
+                uint32_t bg_color = colors.inactive_ws_bg;
+                uint32_t border_color = colors.inactive_ws_border;
+                if (ws_walk->visible) {
+                    if (!ws_walk->focused) {
+                        fg_color = colors.active_ws_fg;
+                        bg_color = colors.active_ws_bg;
+                        border_color = colors.active_ws_border;
+                    } else {
+                        fg_color = colors.focus_ws_fg;
+                        bg_color = colors.focus_ws_bg;
+                        border_color = colors.focus_ws_border;
+                    }
                 }
-            }
-            if (ws_walk->urgent) {
-                DLOG("WS %s is urgent!\n", i3string_as_utf8(ws_walk->name));
-                fg_color = colors.urgent_ws_fg;
-                bg_color = colors.urgent_ws_bg;
-                border_color = colors.urgent_ws_border;
-                unhide = true;
-                if (!ws_walk->focused) {
-                    FREE(last_urgent_ws);
-                    last_urgent_ws = sstrdup(i3string_as_utf8(ws_walk->name));
+                if (ws_walk->urgent) {
+                    DLOG("WS %s is urgent!\n", i3string_as_utf8(ws_walk->name));
+                    fg_color = colors.urgent_ws_fg;
+                    bg_color = colors.urgent_ws_bg;
+                    border_color = colors.urgent_ws_border;
+                    unhide = true;
                 }
-            }
-            uint32_t mask = XCB_GC_FOREGROUND | XCB_GC_BACKGROUND;
-            uint32_t vals_border[] = { border_color, border_color };
-            xcb_change_gc(xcb_connection,
-                          outputs_walk->bargc,
-                          mask,
-                          vals_border);
-            xcb_rectangle_t rect_border = { i, 1, ws_walk->name_width + 10, font.height + 4 };
-            xcb_poly_fill_rectangle(xcb_connection,
-                                    outputs_walk->buffer,
-                                    outputs_walk->bargc,
-                                    1,
-                                    &rect_border);
-            uint32_t vals[] = { bg_color, bg_color };
-            xcb_change_gc(xcb_connection,
-                          outputs_walk->bargc,
-                          mask,
-                          vals);
-            xcb_rectangle_t rect = { i + 1, 2, ws_walk->name_width + 8, font.height + 2 };
-            xcb_poly_fill_rectangle(xcb_connection,
-                                    outputs_walk->buffer,
-                                    outputs_walk->bargc,
-                                    1,
-                                    &rect);
-            set_font_colors(outputs_walk->bargc, fg_color, bg_color);
-            draw_text(ws_walk->name, outputs_walk->buffer, outputs_walk->bargc, i + 5, 3, ws_walk->name_width);
-            i += 10 + ws_walk->name_width + 1;
+                uint32_t mask = XCB_GC_FOREGROUND | XCB_GC_BACKGROUND;
+                uint32_t vals_border[] = { border_color, border_color };
+                xcb_change_gc(xcb_connection,
+                              outputs_walk->bargc,
+                              mask,
+                              vals_border);
+                xcb_rectangle_t rect_border = { i, 1, ws_walk->name_width + 10, font.height + 4 };
+                xcb_poly_fill_rectangle(xcb_connection,
+                                        outputs_walk->buffer,
+                                        outputs_walk->bargc,
+                                        1,
+                                        &rect_border);
+                uint32_t vals[] = { bg_color, bg_color };
+                xcb_change_gc(xcb_connection,
+                              outputs_walk->bargc,
+                              mask,
+                              vals);
+                xcb_rectangle_t rect = { i + 1, 2, ws_walk->name_width + 8, font.height + 2 };
+                xcb_poly_fill_rectangle(xcb_connection,
+                                        outputs_walk->buffer,
+                                        outputs_walk->bargc,
+                                        1,
+                                        &rect);
+                set_font_colors(outputs_walk->bargc, fg_color, bg_color);
+                draw_text(ws_walk->name, outputs_walk->buffer, outputs_walk->bargc,
+                          i + 5, 3, ws_walk->name_width);
+                i += 10 + ws_walk->name_width + 1;
 
+            }
         }
 
-        if (binding.name) {
-
+        if (binding.name && !config.disable_binding_mode_indicator) {
             uint32_t fg_color = colors.urgent_ws_fg;
             uint32_t bg_color = colors.urgent_ws_bg;
             uint32_t mask = XCB_GC_FOREGROUND | XCB_GC_BACKGROUND;
@@ -1670,19 +1808,20 @@ void draw_bars(bool unhide) {
 
             set_font_colors(outputs_walk->bargc, fg_color, bg_color);
             draw_text(binding.name, outputs_walk->buffer, outputs_walk->bargc, i + 5, 3, binding.width);
+
+            unhide = true;
         }
 
         i = 0;
     }
 
-    if (!mod_pressed) {
-        if (unhide) {
-            /* The urgent-hint should get noticed, so we unhide the bars shortly */
-            unhide_bars();
-        } else if (walks_away) {
-            FREE(last_urgent_ws);
-            hide_bars();
-        }
+    /* Assure the bar is hidden/unhidden according to the specified hidden_state and mode */
+    if (mod_pressed ||
+            config.hidden_state == S_SHOW ||
+            unhide) {
+        unhide_bars();
+    } else if (config.hide_on_modifier == M_HIDE) {
+        hide_bars();
     }
 
     redraw_bars();
@@ -1717,5 +1856,6 @@ void redraw_bars(void) {
 void set_current_mode(struct mode *current) {
     I3STRING_FREE(binding.name);
     binding = *current;
+    activated_mode = binding.name != NULL;
     return;
 }

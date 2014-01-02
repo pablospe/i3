@@ -7,8 +7,7 @@
  * commands.c: all command functions (see commands_parser.c)
  *
  */
-#ifndef I3_COMMANDS_H
-#define I3_COMMANDS_H
+#pragma once
 
 #include "commands_parser.h"
 
@@ -114,6 +113,12 @@ void cmd_workspace_name(I3_CMD, char *name);
  *
  */
 void cmd_mark(I3_CMD, char *mark);
+
+/**
+ * Implementation of 'unmark [mark]'
+ *
+ */
+void cmd_unmark(I3_CMD, char *mark);
 
 /**
  * Implementation of 'mode <string>'.
@@ -265,4 +270,20 @@ void cmd_scratchpad_show(I3_CMD);
  */
 void cmd_rename_workspace(I3_CMD, char *old_name, char *new_name);
 
-#endif
+/**
+ * Implementation of 'bar (hidden_state hide|show|toggle)|(mode dock|hide|invisible|toggle) [<bar_id>]'
+ *
+ */
+void cmd_bar(I3_CMD, char *bar_type, char *bar_value, char *bar_id);
+
+/*
+ * Implementation of 'shmlog <size>|toggle|on|off'
+ *
+ */
+void cmd_shmlog(I3_CMD, char *argument);
+
+/*
+ * Implementation of 'debuglog toggle|on|off'
+ *
+ */
+void cmd_debuglog(I3_CMD, char *argument);

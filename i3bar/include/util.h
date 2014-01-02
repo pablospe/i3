@@ -5,8 +5,7 @@
  * © 2009-2011 Michael Stapelberg and contributors (see also: LICENSE)
  *
  */
-#ifndef UTIL_H_
-#define UTIL_H_
+#pragma once
 
 #include "queue.h"
 
@@ -36,8 +35,6 @@
     } \
 } while (0)
 
-#endif
-
 /* Securely fee tail-queues */
 #define FREE_TAILQ(l, type) do { \
     type *walk = TAILQ_FIRST(l); \
@@ -48,6 +45,9 @@
     } \
 } while (0)
 
+#if defined(DLOG)
+#undef DLOG
+#endif
 /* Use cool logging-macros */
 #define DLOG(fmt, ...) do { \
     if (config.verbose) { \

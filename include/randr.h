@@ -9,8 +9,7 @@
  * (take your time to read it completely, it answers all questions).
  *
  */
-#ifndef I3_RANDR_H
-#define I3_RANDR_H
+#pragma once
 
 #include "data.h"
 #include <xcb/randr.h>
@@ -87,6 +86,16 @@ Output *get_output_by_name(const char *name);
  */
 Output *get_output_containing(int x, int y);
 
+/*
+ * In contained_by_output, we check if any active output contains part of the container.
+ * We do this by checking if the output rect is intersected by the Rect.
+ * This is the 2-dimensional counterpart of get_output_containing.
+ * Since we don't actually need the outputs intersected by the given Rect (There could
+ * be many), we just return true or false for convenience.
+ *
+ */
+bool contained_by_output(Rect rect);
+
 /**
  * Gets the output which is the next one in the given direction.
  *
@@ -111,5 +120,3 @@ Output *get_output_next(direction_t direction, Output *current, output_close_far
  *
  */
 Output *get_output_next_wrap(direction_t direction, Output *current);
-
-#endif

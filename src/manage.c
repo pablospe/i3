@@ -4,7 +4,7 @@
  * vim:ts=4:sw=4:expandtab
  *
  * i3 - an improved dynamic tiling window manager
- * © 2009-2012 Michael Stapelberg and contributors (see also: LICENSE)
+ * © 2009-2013 Michael Stapelberg and contributors (see also: LICENSE)
  *
  * manage.c: Initially managing new windows (or existing ones on restart).
  *
@@ -124,34 +124,30 @@ void manage_window(xcb_window_t window, xcb_get_window_attributes_cookie_t cooki
 #endif
 
     geomc = xcb_get_geometry(conn, d);
-#define FREE_GEOMETRY() do { \
-    if ((geom = xcb_get_geometry_reply(conn, geomc, 0)) != NULL) \
-        free(geom); \
-} while (0)
 
     /* Check if the window is mapped (it could be not mapped when intializing and
        calling manage_window() for every window) */
     if ((attr = xcb_get_window_attributes_reply(conn, cookie, 0)) == NULL) {
         DLOG("Could not get attributes\n");
-        FREE_GEOMETRY();
+        xcb_discard_reply(conn, geomc.sequence);
         return;
     }
 
     if (needs_to_be_mapped && attr->map_state != XCB_MAP_STATE_VIEWABLE) {
-        FREE_GEOMETRY();
+        xcb_discard_reply(conn, geomc.sequence);
         goto out;
     }
 
     /* Don’t manage clients with the override_redirect flag */
     if (attr->override_redirect) {
-        FREE_GEOMETRY();
+        xcb_discard_reply(conn, geomc.sequence);
         goto out;
     }
 
     /* Check if the window is already managed */
     if (con_by_window_id(window) != NULL) {
         DLOG("already managed (by con %p)\n", con_by_window_id(window));
-        FREE_GEOMETRY();
+        xcb_discard_reply(conn, geomc.sequence);
         goto out;
     }
 
@@ -229,7 +225,8 @@ void manage_window(xcb_window_t window, xcb_get_window_attributes_cookie_t cooki
     window_update_transient_for(cwindow, xcb_get_property_reply(conn, transient_cookie, NULL));
     window_update_strut_partial(cwindow, xcb_get_property_reply(conn, strut_cookie, NULL));
     window_update_role(cwindow, xcb_get_property_reply(conn, role_cookie, NULL), true);
-    window_update_hints(cwindow, xcb_get_property_reply(conn, wm_hints_cookie, NULL));
+    bool urgency_hint;
+    window_update_hints(cwindow, xcb_get_property_reply(conn, wm_hints_cookie, NULL), &urgency_hint);
 #ifdef USE_ICONS
     window_update_icon(cwindow, xcb_get_property_reply(conn, wm_icon_cookie, NULL));
 #endif
@@ -316,11 +313,17 @@ void manage_window(xcb_window_t window, xcb_get_window_attributes_cookie_t cooki
         if ((assignment = assignment_for(cwindow, A_TO_WORKSPACE | A_TO_OUTPUT))) {
             DLOG("Assignment matches (%p)\n", match);
             if (assignment->type == A_TO_WORKSPACE) {
-                nc = con_descend_tiling_focused(workspace_get(assignment->dest.workspace, NULL));
-                DLOG("focused on ws %s: %p / %s\n", assignment->dest.workspace, nc, nc->name);
+                Con *assigned_ws = workspace_get(assignment->dest.workspace, NULL);
+                nc = con_descend_tiling_focused(assigned_ws);
+                DLOG("focused on ws %s: %p / %s\n", assigned_ws->name, nc, nc->name);
                 if (nc->type == CT_WORKSPACE)
                     nc = tree_open_con(nc, cwindow);
-                else nc = tree_open_con(nc->parent, cwindow);
+                else
+                    nc = tree_open_con(nc->parent, cwindow);
+
+                /* set the urgency hint on the window if the workspace is not visible */
+                if (!workspace_is_visible(assigned_ws))
+                    urgency_hint = true;
             }
         /* TODO: handle assignments with type == A_TO_OUTPUT */
         } else if (startup_ws) {
@@ -346,9 +349,23 @@ void manage_window(xcb_window_t window, xcb_get_window_attributes_cookie_t cooki
         if (match != NULL && match->insert_where == M_BELOW) {
             nc = tree_open_con(nc, cwindow);
         }
+
+        /* If M_BELOW is not used, the container is replaced. This happens with
+         * "swallows" criteria that are used for stored layouts, in which case
+         * we need to remove that criterion, because they should only be valid
+         * once. */
+        if (match != NULL && match->insert_where != M_BELOW) {
+            DLOG("Removing match %p from container %p\n", match, nc);
+            TAILQ_REMOVE(&(nc->swallow_head), match, matches);
+        }
     }
 
     DLOG("new container = %p\n", nc);
+    if (nc->window != NULL) {
+        if (!restore_kill_placeholder(nc->window->id)) {
+            DLOG("Uh?! Container without a placeholder, but with a window, has swallowed this to-be-managed window?!\n");
+        }
+    }
     nc->window = cwindow;
     x_reinit(nc);
 
@@ -359,10 +376,19 @@ void manage_window(xcb_window_t window, xcb_get_window_attributes_cookie_t cooki
     x_set_name(nc, name);
     free(name);
 
+    /* handle fullscreen containers */
     Con *ws = con_get_workspace(nc);
     Con *fs = (ws ? con_get_fullscreen_con(ws, CF_OUTPUT) : NULL);
     if (fs == NULL)
         fs = con_get_fullscreen_con(croot, CF_GLOBAL);
+
+    state_reply = xcb_get_property_reply(conn, state_cookie, NULL);
+    if (xcb_reply_contains_atom(state_reply, A__NET_WM_STATE_FULLSCREEN)) {
+        fs = NULL;
+        con_toggle_fullscreen(nc, CF_OUTPUT);
+    }
+
+    FREE(state_reply);
 
     if (fs == NULL) {
         DLOG("Not in fullscreen mode, focusing\n");
@@ -502,6 +528,12 @@ void manage_window(xcb_window_t window, xcb_get_window_attributes_cookie_t cooki
 
     /* Send an event about window creation */
     ipc_send_window_new_event(nc);
+
+    /* Windows might get managed with the urgency hint already set (Pidgin is
+     * known to do that), so check for that and handle the hint accordingly.
+     * This code needs to be in this part of manage_window() because the window
+     * needs to be on the final workspace first. */
+    con_set_urgency(nc, urgency_hint);
 
 geom_out:
     free(geom);

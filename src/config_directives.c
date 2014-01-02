@@ -14,16 +14,6 @@
 
 #include "all.h"
 
-// Macros to make the YAJL API a bit easier to use.
-#define y(x, ...) yajl_gen_ ## x (cmd_output->json_gen, ##__VA_ARGS__)
-#define ystr(str) yajl_gen_string(cmd_output->json_gen, (unsigned char*)str, strlen(str))
-#define ysuccess(success) do { \
-    y(map_open); \
-    ystr("success"); \
-    y(bool, success); \
-    y(map_close); \
-} while (0)
-
 /*******************************************************************************
  * Criteria functions.
  ******************************************************************************/
@@ -65,7 +55,7 @@ CFGFUN(criteria_add, const char *ctype, const char *cvalue) {
     }
 
     if (strcmp(ctype, "window_role") == 0) {
-        current_match->role = regex_new(cvalue);
+        current_match->window_role = regex_new(cvalue);
         return;
     }
 
@@ -452,7 +442,15 @@ CFGFUN(bar_font, const char *font) {
 }
 
 CFGFUN(bar_mode, const char *mode) {
-    current_bar.mode = (strcmp(mode, "hide") == 0 ? M_HIDE : M_DOCK);
+    current_bar.mode = (strcmp(mode, "dock") == 0 ? M_DOCK : (strcmp(mode, "hide") == 0 ? M_HIDE : M_INVISIBLE));
+}
+
+CFGFUN(bar_hidden_state, const char *hidden_state) {
+    current_bar.hidden_state = (strcmp(hidden_state, "hide") == 0 ? S_HIDE : S_SHOW);
+}
+
+CFGFUN(bar_id, const char *bar_id) {
+    current_bar.id = sstrdup(bar_id);
 }
 
 CFGFUN(bar_output, const char *output) {
@@ -542,21 +540,21 @@ CFGFUN(bar_status_command, const char *command) {
     current_bar.status_command = sstrdup(command);
 }
 
+CFGFUN(bar_binding_mode_indicator, const char *value) {
+    current_bar.hide_binding_mode_indicator = !eval_boolstr(value);
+}
+
 CFGFUN(bar_workspace_buttons, const char *value) {
     current_bar.hide_workspace_buttons = !eval_boolstr(value);
 }
 
 CFGFUN(bar_finish) {
     DLOG("\t new bar configuration finished, saving.\n");
-    /* Generate a unique ID for this bar */
-    current_bar.id = sstrdup("bar-XXXXXX");
-    /* This works similar to mktemp in that it replaces the last six X with
-     * random letters, but without the restriction that the given buffer
-     * has to contain a valid path name. */
-    char *x = current_bar.id + strlen("bar-");
-    while (*x != '\0') {
-        *(x++) = (rand() % 26) + 'a';
-    }
+    /* Generate a unique ID for this bar if not already configured */
+    if (!current_bar.id)
+        sasprintf(&current_bar.id, "bar-%d", config.number_barconfigs);
+
+    config.number_barconfigs++;
 
     /* If no font was explicitly set, we use the i3 font as default */
     if (!current_bar.font && font_pattern)

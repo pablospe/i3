@@ -128,6 +128,8 @@ Con *create_workspace_on_output(Output *output, Con *content) {
             continue;
         DLOG("relevant command = %s\n", bind->command);
         char *target = bind->command + strlen("workspace ");
+        while((*target == ' ' || *target == '\t') && target != '\0')
+            target++;
         /* We check if this is the workspace
          * next/prev/next_on_output/prev_on_output/back_and_forth/number command.
          * Beware: The workspace names "next", "prev", "next_on_output",
@@ -195,17 +197,16 @@ Con *create_workspace_on_output(Output *output, Con *content) {
         while (exists) {
             c++;
 
-            FREE(ws->name);
-            sasprintf(&(ws->name), "%d", c);
+            ws->num = c;
 
             current = NULL;
             TAILQ_FOREACH(out, &(croot->nodes_head), nodes)
-                GREP_FIRST(current, output_get_content(out), !strcasecmp(child->name, ws->name));
+                GREP_FIRST(current, output_get_content(out), child->num == ws->num);
             exists = (current != NULL);
 
-            DLOG("result for ws %s / %d: exists = %d\n", ws->name, c, exists);
+            DLOG("result for ws %d: exists = %d\n", c, exists);
         }
-        ws->num = c;
+        sasprintf(&(ws->name), "%d", c);
     }
     con_attach(ws, content, false);
 
@@ -442,7 +443,7 @@ static void _workspace_show(Con *workspace) {
     } else
         con_focus(next);
 
-    ipc_send_workspace_focus_event(workspace, old);
+    ipc_send_workspace_focus_event(workspace, current);
 
     DLOG("old = %p / %s\n", old, (old ? old->name : "(null)"));
     /* Close old workspace if necessary. This must be done *after* doing

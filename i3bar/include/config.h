@@ -7,8 +7,7 @@
  * config.c: Parses the configuration (received from i3).
  *
  */
-#ifndef CONFIG_H_
-#define CONFIG_H_
+#pragma once
 
 #include "common.h"
 
@@ -19,18 +18,24 @@ typedef enum {
 } position_t;
 
 typedef struct config_t {
-    int          hide_on_modifier;
     int          modifier;
     position_t   position;
     int          verbose;
     struct xcb_color_strings_t colors;
-    int          disable_ws;
+    bool         disable_binding_mode_indicator;
+    bool         disable_ws;
     char         *bar_id;
     char         *command;
     char         *fontname;
     char         *tray_output;
     int          num_outputs;
     char         **outputs;
+
+    /* Bar display mode (hide unless modifier is pressed or show in dock mode or always hide in invisible mode) */
+    enum { M_DOCK = 0, M_HIDE = 1, M_INVISIBLE = 2 } hide_on_modifier;
+
+    /* The current hidden_state of the bar, which indicates whether it is hidden or shown */
+    enum { S_HIDE = 0, S_SHOW = 1 } hidden_state;
 } config_t;
 
 config_t config;
@@ -46,5 +51,3 @@ void parse_config_json(char *json);
  *
  */
 void free_colors(struct xcb_color_strings_t *colors);
-
-#endif
