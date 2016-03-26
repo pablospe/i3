@@ -357,6 +357,11 @@ struct Window {
 
     /** Depth of the window */
     uint16_t depth;
+
+#ifdef USE_ICONS
+    /** Window icon, array of size 16x16 containing the ARGB pixels */
+    uint32_t* icon;
+#endif
 };
 
 /**
@@ -472,6 +477,7 @@ struct Con {
     xcb_window_t frame;
     xcb_pixmap_t pixmap;
     xcb_gcontext_t pm_gc;
+    uint16_t frame_depth;
 
     enum {
         CT_ROOT = 0,

@@ -119,7 +119,9 @@ void manage_window(xcb_window_t window, xcb_get_window_attributes_cookie_t cooki
                               utf8_title_cookie, title_cookie,
                               class_cookie, leader_cookie, transient_cookie,
                               role_cookie, startup_id_cookie, wm_hints_cookie;
-
+#ifdef USE_ICONS                              
+    xcb_get_property_cookie_t wm_icon_cookie;
+#endif
 
     geomc = xcb_get_geometry(conn, d);
 
@@ -188,6 +190,9 @@ void manage_window(xcb_window_t window, xcb_get_window_attributes_cookie_t cooki
     role_cookie = GET_PROPERTY(A_WM_WINDOW_ROLE, 128);
     startup_id_cookie = GET_PROPERTY(A__NET_STARTUP_ID, 512);
     wm_hints_cookie = xcb_icccm_get_wm_hints(conn, window);
+#ifdef USE_ICONS
+    wm_icon_cookie = xcb_get_property_unchecked(conn, false, window, A__NET_WM_ICON, XCB_ATOM_CARDINAL, 0, UINT32_MAX);
+#endif
     /* TODO: also get wm_normal_hints here. implement after we got rid of xcb-event */
 
     DLOG("Managing window 0x%08x\n", window);
@@ -222,6 +227,9 @@ void manage_window(xcb_window_t window, xcb_get_window_attributes_cookie_t cooki
     window_update_role(cwindow, xcb_get_property_reply(conn, role_cookie, NULL), true);
     bool urgency_hint;
     window_update_hints(cwindow, xcb_get_property_reply(conn, wm_hints_cookie, NULL), &urgency_hint);
+#ifdef USE_ICONS
+    window_update_icon(cwindow, xcb_get_property_reply(conn, wm_icon_cookie, NULL));
+#endif
 
     xcb_get_property_reply_t *startup_id_reply;
     startup_id_reply = xcb_get_property_reply(conn, startup_id_cookie, NULL);
@@ -235,6 +243,18 @@ void manage_window(xcb_window_t window, xcb_get_window_attributes_cookie_t cooki
     Con *search_at = croot;
 
     xcb_get_property_reply_t *reply = xcb_get_property_reply(conn, wm_type_cookie, NULL);
+
+    /* Don't manage desktop type windows, just map them */
+    if (xcb_reply_contains_atom(reply, A__NET_WM_WINDOW_TYPE_DESKTOP)) {
+        LOG("Ignoring window of type desktop\n");
+        xcb_map_window(conn, window);
+
+        uint32_t values[] = { XCB_STACK_MODE_BELOW };
+        xcb_configure_window (conn, window, XCB_CONFIG_WINDOW_STACK_MODE, values);
+
+        goto geom_out;
+    }
+
     if (xcb_reply_contains_atom(reply, A__NET_WM_WINDOW_TYPE_DOCK)) {
         LOG("This window is of type dock\n");
         Output *output = get_output_containing(geom->x, geom->y);
@@ -263,6 +283,20 @@ void manage_window(xcb_window_t window, xcb_get_window_attributes_cookie_t cooki
             }
         }
     }
+
+
+    xcb_get_property_reply_t* state_reply = xcb_get_property_reply(conn, state_cookie, NULL);
+    bool want_fullscreen = false;
+    if (xcb_reply_contains_atom(state_reply, A__NET_WM_STATE_FULLSCREEN)) {
+        want_fullscreen = true;
+    }
+    bool want_floating = false;
+    if (xcb_reply_contains_atom(state_reply, A__NET_WM_STATE_STAYS_ON_TOP)) {
+        /* don't dock _NET_WM_STATE_STAYS_ON_TOP windows */
+        cwindow->dock = W_NODOCK;
+        want_floating = true;
+    }
+    FREE(state_reply);
 
     DLOG("Initial geometry: (%d, %d, %d, %d)\n", geom->x, geom->y, geom->width, geom->height);
 
@@ -348,7 +382,7 @@ void manage_window(xcb_window_t window, xcb_get_window_attributes_cookie_t cooki
     if (fs == NULL)
         fs = con_get_fullscreen_con(croot, CF_GLOBAL);
 
-    xcb_get_property_reply_t *state_reply = xcb_get_property_reply(conn, state_cookie, NULL);
+    state_reply = xcb_get_property_reply(conn, state_cookie, NULL);
     if (xcb_reply_contains_atom(state_reply, A__NET_WM_STATE_FULLSCREEN)) {
         fs = NULL;
         con_toggle_fullscreen(nc, CF_OUTPUT);
@@ -387,7 +421,6 @@ void manage_window(xcb_window_t window, xcb_get_window_attributes_cookie_t cooki
     }
 
     /* set floating if necessary */
-    bool want_floating = false;
     if (xcb_reply_contains_atom(reply, A__NET_WM_WINDOW_TYPE_DIALOG) ||
         xcb_reply_contains_atom(reply, A__NET_WM_WINDOW_TYPE_UTILITY) ||
         xcb_reply_contains_atom(reply, A__NET_WM_WINDOW_TYPE_TOOLBAR) ||
@@ -458,6 +491,9 @@ void manage_window(xcb_window_t window, xcb_get_window_attributes_cookie_t cooki
     values[0] = CHILD_EVENT_MASK & ~XCB_EVENT_MASK_ENTER_WINDOW;
     xcb_change_window_attributes(conn, window, XCB_CW_EVENT_MASK, values);
     xcb_flush(conn);
+
+    if (want_fullscreen)
+        con_toggle_fullscreen(nc, CF_OUTPUT);
 
     /* Put the client inside the save set. Upon termination (whether killed or
      * normal exit does not matter) of the window manager, these clients will

@@ -61,3 +61,9 @@ void window_update_role(i3Window *win, xcb_get_property_reply_t *prop, bool befo
  *
  */
 void window_update_hints(i3Window *win, xcb_get_property_reply_t *prop, bool *urgency_hint);
+
+/**
+ * Updates the _NET_WM_ICON
+ *
+ */
+void window_update_icon(i3Window *win, xcb_get_property_reply_t *prop);
